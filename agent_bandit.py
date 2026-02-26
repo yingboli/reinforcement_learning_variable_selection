@@ -45,11 +45,11 @@ def _default_policy_kwargs_for_n_features(n_features: int) -> Dict[str, Any]:
     # Feature extractor and vf fixed minimal (not meaningful in bandit)
     fe_kwargs = {"features_extractor_class": MinimalFeatureExtractor, "features_extractor_kwargs": {"features_dim": 32}}
     if n_features <= 50:
-        return {**fe_kwargs, "net_arch": [dict(pi=[64, 32], vf=[16])]}
+        return {**fe_kwargs, "net_arch": dict(pi=[64, 32], vf=[16])}
     elif n_features <= 200:
-        return {**fe_kwargs, "net_arch": [dict(pi=[128, 64], vf=[16])]}
+        return {**fe_kwargs, "net_arch": dict(pi=[128, 64], vf=[16])}
     else:
-        return {**fe_kwargs, "net_arch": [dict(pi=[256, 128], vf=[16])]}
+        return {**fe_kwargs, "net_arch": dict(pi=[256, 128], vf=[16])}
 
 
 class VariableSelectionPPO(BaseVariableSelectionPPO):

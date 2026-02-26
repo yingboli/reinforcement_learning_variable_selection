@@ -49,20 +49,20 @@ def _default_policy_kwargs_for_n_features(n_features: int) -> Dict[str, Any]:
         return {
             "features_extractor_class": SequentialFeatureExtractor,
             "features_extractor_kwargs": {"features_dim": 64, "net_arch": [128, 64]},
-            "net_arch": [dict(pi=[64, 32], vf=[64, 32])],
+            "net_arch": dict(pi=[64, 32], vf=[64, 32]),
         }
     elif n_features <= 200:
         return {
             "features_extractor_class": SequentialFeatureExtractor,
             "features_extractor_kwargs": {"features_dim": 128, "net_arch": [256, 128]},
-            "net_arch": [dict(pi=[128, 64], vf=[128, 64])],
+            "net_arch": dict(pi=[128, 64], vf=[128, 64]),
         }
     else:
         # e.g. n_features = 500 or more
         return {
             "features_extractor_class": SequentialFeatureExtractor,
             "features_extractor_kwargs": {"features_dim": 256, "net_arch": [512, 256]},
-            "net_arch": [dict(pi=[256, 128], vf=[128, 64])],
+            "net_arch": dict(pi=[256, 128], vf=[128, 64]),
         }
 
 

@@ -141,21 +141,23 @@ def train_and_evaluate_sequential(
         action_type=action_type, random_state=42,
     )
     
-    # Create agent
+    # Create agent (higher ent_coef and n_steps for better exploration in sequential MDP)
     agent = SequentialVariableSelectionPPO(
         env,
         learning_rate=learning_rate,
-        n_steps=2048,
-        batch_size=64,
+        n_steps=4096,
+        batch_size=128,
         n_epochs=10,
         gamma=0.0,  # No future discounting
+        ent_coef=0.02,
         verbose=1,
         seed=42,
     )
     
-    # Train
-    print(f"\nTraining sequential agent for {total_timesteps} timesteps...")
-    agent.train(total_timesteps=total_timesteps, log_interval=10)
+    # Train (sequential typically needs more timesteps than bandit to explore the action space)
+    seq_timesteps = int(total_timesteps * 2.5)
+    print(f"\nTraining sequential agent for {seq_timesteps} timesteps...")
+    agent.train(total_timesteps=seq_timesteps, log_interval=10)
     
     # Select features (runs full episode)
     selected_features = agent.select_features(deterministic=True)

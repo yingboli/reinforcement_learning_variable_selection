@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Results / logs (optional)
+results/
+results_comparison/
+*.zip
