@@ -61,7 +61,7 @@ Classification reward types: `accuracy`, `f1_weighted`, `roc_auc`. Datasets: `sy
 - `--n_samples`: Number of samples (for synthetic data, default: 200)
 - `--n_features`: Number of features (for synthetic data, default: 50)
 - `--sparsity_penalty`: Sparsity penalty coefficient α (default: 0.01)
-- `--reward_type`: Regression: `r2` or `mse`. Classification: `accuracy`, `f1_weighted`, `roc_auc`. Default: `r2` / `accuracy`
+- `--reward_type`: Regression: `r2`, `mse`, `cv_rmse` (cross-validated RMSE), `aic`, `bic`, `bayes_factor` (g-prior BF vs null). Classification: `accuracy`, `f1_weighted`, `roc_auc`. Default: `r2` / `accuracy`
 - `--total_timesteps`: Total training timesteps (default: 10000)
 - `--max_episode_steps`: Maximum steps per episode (default: 50)
 - `--learning_rate`: Learning rate for PPO (default: 3e-4)

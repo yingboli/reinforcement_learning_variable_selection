@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Dict, Any, Optional, Tuple
-from sklearn.linear_model import LassoCV, Ridge, LogisticRegression, LogisticRegressionCV
+from sklearn.linear_model import LassoCV, Lasso, Ridge, LogisticRegression, LogisticRegressionCV
 from sklearn.feature_selection import RFE, SequentialFeatureSelector
 from sklearn.metrics import (
     mean_squared_error,
@@ -102,6 +102,71 @@ def evaluate_selection(
         }
 
 
+def _log_bayes_factor_regression(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    selected: np.ndarray,
+    g_prior: float,
+) -> float:
+    """Log Bayes factor vs null (intercept-only) under g-prior. Used for MCMC baseline."""
+    n, p_total = X_train.shape[0], X_train.shape[1]
+    if len(selected) == 0:
+        return 0.0
+    X_sel = X_train[:, selected]
+    model = Ridge(alpha=1e-10)
+    model.fit(X_sel, y_train)
+    y_pred = model.predict(X_sel)
+    r2 = r2_score(y_train, y_pred)
+    r2_safe = np.clip(r2, 1e-10, 1 - 1e-10)
+    p_g = len(selected)
+    bf = (1 + g_prior) ** ((n - p_g - 1) / 2) * (
+        1 + g_prior * (1 - r2_safe)
+    ) ** (-(n - 1) / 2)
+    return np.log(max(bf, 1e-300))
+
+
+def _mcmc_metropolis_variable_selection(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    n_iter: int = 500,
+    random_state: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Metropolis algorithm for Bayesian variable selection (g-prior).
+    Propose by flipping one coordinate or swapping two; accept with min(1, BF_new/BF_old).
+    Returns selected feature indices (gamma where gamma_j=1).
+    """
+    rng = np.random.default_rng(random_state)
+    n, p = X_train.shape
+    g_prior = max(p ** 2, n)
+    gamma = np.zeros(p, dtype=np.int8)
+    log_bf = _log_bayes_factor_regression(
+        X_train, y_train, np.where(gamma)[0], g_prior
+    )
+    best_gamma = gamma.copy()
+    best_log_bf = log_bf
+    for _ in range(n_iter):
+        if rng.random() < 0.5:
+            # Flip one coordinate
+            j = rng.integers(0, p)
+            gamma_new = gamma.copy()
+            gamma_new[j] = 1 - gamma_new[j]
+        else:
+            # Swap two coordinates
+            idx = rng.choice(p, size=2, replace=False)
+            gamma_new = gamma.copy()
+            gamma_new[idx[0]], gamma_new[idx[1]] = gamma_new[idx[1]], gamma_new[idx[0]]
+        sel_new = np.where(gamma_new)[0]
+        log_bf_new = _log_bayes_factor_regression(X_train, y_train, sel_new, g_prior)
+        if np.log(rng.random()) < log_bf_new - log_bf:
+            gamma = gamma_new
+            log_bf = log_bf_new
+            if log_bf > best_log_bf:
+                best_gamma = gamma.copy()
+                best_log_bf = log_bf
+    return np.where(best_gamma)[0]
+
+
 def compare_with_baselines(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -114,7 +179,8 @@ def compare_with_baselines(
 ) -> pd.DataFrame:
     """
     Compare RL-selected features with baseline methods.
-    For regression: LassoCV, Forward Selection, RFE, All. For classification: LogisticRegressionCV, Forward, RFE, All.
+    Regression: RL, LassoCV, Adaptive Lasso, Forward Selection, RFE, MCMC (Metropolis), All.
+    Classification: RL, LogisticRegressionCV, Forward, RFE, All.
     """
     results = []
     if n_features_target is None:
@@ -152,6 +218,23 @@ def compare_with_baselines(
                 X_train, y_train, X_test, y_test, lasso_features, task=task, cv=cv
             )
             results.append(_row("LassoCV", lr_results))
+        # 2b. Adaptive Lasso: weights w_j = 1/|beta_hat_j| from OLS/Ridge
+        try:
+            ridge_init = Ridge(alpha=1e-5, random_state=42).fit(X_train, y_train)
+            beta_hat = ridge_init.coef_
+            w = 1 / np.maximum(np.abs(beta_hat), 1e-5)
+            X_adaptive = X_train * w
+            adlasso = LassoCV(cv=cv, random_state=42, max_iter=2000)
+            adlasso.fit(X_adaptive, y_train)
+            adlasso_coef = adlasso.coef_ * w  # map back to original scale for support
+            adlasso_features = np.where(np.abs(adlasso_coef) > 1e-6)[0]
+            if len(adlasso_features) > 0:
+                adlasso_results = evaluate_selection(
+                    X_train, y_train, X_test, y_test, adlasso_features, task=task, cv=cv
+                )
+                results.append(_row("Adaptive Lasso", adlasso_results))
+        except Exception as e:
+            print(f"Adaptive Lasso failed: {e}")
     else:
         logreg_cv = LogisticRegressionCV(cv=cv, random_state=42, max_iter=1000)
         logreg_cv.fit(X_train, y_train)
@@ -200,7 +283,21 @@ def compare_with_baselines(
         except Exception as e:
             print(f"RFE failed: {e}")
     
-    # 5. All features
+    # 5. MCMC (Metropolis) for regression only
+    if task == "regression":
+        try:
+            mcmc_features = _mcmc_metropolis_variable_selection(
+                X_train, y_train, n_iter=500, random_state=42
+            )
+            if len(mcmc_features) > 0:
+                mcmc_results = evaluate_selection(
+                    X_train, y_train, X_test, y_test, mcmc_features, task=task, cv=cv
+                )
+                results.append(_row("MCMC (Metropolis)", mcmc_results))
+        except Exception as e:
+            print(f"MCMC failed: {e}")
+    
+    # 6. All features
     all_features = np.arange(X_train.shape[1])
     all_results = evaluate_selection(
         X_train, y_train, X_test, y_test, all_features, task=task, cv=cv
