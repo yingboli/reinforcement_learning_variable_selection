@@ -83,7 +83,6 @@ def train_rl_agent(
     X_val,
     y_val,
     task: str = "regression",
-    sparsity_penalty: float = 0.01,
     reward_type: str = None,
     total_timesteps: int = 10000,
     learning_rate: float = 3e-4,
@@ -92,18 +91,16 @@ def train_rl_agent(
 ):
     """
     Train RL agent for variable selection (bandit problem).
-    task: 'regression' or 'classification'. reward_type default: 'r2' for regression, 'accuracy' for classification.
+    task: 'regression' or 'classification'. reward_type default: 'cv_rmse' / 'cv_auc'.
     """
     if reward_type is None:
-        reward_type = "r2" if task == "regression" else "accuracy"
+        reward_type = "cv_rmse" if task == "regression" else "cv_auc"
     env = VariableSelectionEnv(
         X_train,
         y_train,
         task=task,
-        sparsity_penalty=sparsity_penalty,
         reward_type=reward_type,
-        use_cv=True,
-        cv_folds=3,
+        cv_folds=5,
         random_state=42,
     )
     
@@ -185,16 +182,10 @@ def main():
         help="Number of features (for synthetic data)",
     )
     parser.add_argument(
-        "--sparsity_penalty",
-        type=float,
-        default=0.01,
-        help="Sparsity penalty coefficient",
-    )
-    parser.add_argument(
         "--reward_type",
         type=str,
         default=None,
-        help="Reward: regression: r2 or mse; classification: accuracy, f1_weighted, roc_auc. Default: r2 / accuracy",
+        help="Reward: regression: cv_rmse, aic, bic, bayes_factor; classification: cv_auc, aic, bic",
     )
     parser.add_argument(
         "--total_timesteps",
@@ -265,7 +256,6 @@ def main():
     agent, env = train_rl_agent(
         X_train, y_train, X_val, y_val,
         task=args.task,
-        sparsity_penalty=args.sparsity_penalty,
         reward_type=args.reward_type,
         total_timesteps=args.total_timesteps,
         learning_rate=args.learning_rate,

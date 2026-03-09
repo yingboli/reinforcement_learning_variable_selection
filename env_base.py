@@ -2,16 +2,16 @@
 Base environment for reinforcement learning-based variable selection.
 
 Shared logic for reward computation, model fitting, and caching.
-Supports regression (Ridge) and classification (LogisticRegression).
+Supports regression (OLS / normal linear regression) and classification (LogisticRegression).
 Subclasses define action/observation spaces and step/reset semantics.
 """
 
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from sklearn.linear_model import Ridge, LogisticRegression
-from sklearn.model_selection import cross_val_score
-from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, f1_score
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import cross_val_score, KFold
+from sklearn.metrics import r2_score
 from typing import Optional, Tuple, Dict, Any
 
 
@@ -20,42 +20,36 @@ class BaseVariableSelectionEnv(gym.Env):
     Base class for variable selection environments.
     
     Handles common setup (data, model, cache) and reward computation.
-    Supports task='regression' (Ridge, reward_type r2/mse) or task='classification'
-    (LogisticRegression, reward_type accuracy/f1_weighted/roc_auc).
+    Supports task='regression' (OLS, reward_type cv_rmse/aic/bic/bayes_factor) or task='classification'
+    (LogisticRegression, reward_type cv_auc/aic/bic).
     Subclasses must define action_space, observation_space, reset(), step(),
     and _get_observation().
     """
     
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
     
-    _REGRESSION_REWARD_TYPES = ("r2", "mse", "cv_rmse", "aic", "bic", "bayes_factor")
-    _CLASSIFICATION_REWARD_TYPES = ("accuracy", "f1_weighted", "roc_auc")
-    
+    _REGRESSION_REWARD_TYPES = ("cv_rmse", "aic", "bic", "bayes_factor")
+    _CLASSIFICATION_REWARD_TYPES = ("cv_auc", "aic", "bic")
+
     def __init__(
         self,
         X: np.ndarray,
         y: np.ndarray,
         task: str = "regression",
-        sparsity_penalty: float = 0.01,
         reward_type: Optional[str] = None,
-        use_cv: bool = True,
-        cv_folds: int = 3,
-        model_alpha: float = 1.0,
+        cv_folds: int = 5,
         random_state: Optional[int] = None,
     ):
         """
         Initialize the base variable selection environment.
-        
+
         Args:
             X: Feature matrix (n_samples, n_features)
             y: Target vector (n_samples,) - continuous for regression, int/labels for classification
             task: 'regression' or 'classification'
-            sparsity_penalty: Penalty coefficient α for number of selected features
-            reward_type: For regression: 'r2', 'mse', 'cv_rmse', 'aic', 'bic', 'bayes_factor'.
-                For classification: 'accuracy', 'f1_weighted', 'roc_auc'. Default: 'r2' / 'accuracy'.
-            use_cv: Whether to use cross-validation for reward estimation
-            cv_folds: Number of CV folds if use_cv=True
-            model_alpha: Regularization (Ridge alpha or LogisticRegression C=1/alpha)
+            reward_type: For regression: 'cv_rmse', 'aic', 'bic', 'bayes_factor'.
+                For classification: 'cv_auc', 'aic', 'bic'. Default: 'cv_rmse' / 'cv_auc'.
+            cv_folds: Number of CV folds (for cv_rmse and cv_auc).
             random_state: Random seed for reproducibility
         """
         super().__init__()
@@ -70,14 +64,11 @@ class BaseVariableSelectionEnv(gym.Env):
         self.n_features = X.shape[1]
         self.n_samples = X.shape[0]
         self.task = task
-        self.sparsity_penalty = sparsity_penalty
-        self.use_cv = use_cv
         self.cv_folds = cv_folds
-        self.model_alpha = model_alpha
         self.random_state = random_state
         
         if reward_type is None:
-            reward_type = "r2" if task == "regression" else "accuracy"
+            reward_type = "cv_rmse" if task == "regression" else "cv_auc"
         if task == "regression" and reward_type not in self._REGRESSION_REWARD_TYPES:
             raise ValueError(f"reward_type must be in {self._REGRESSION_REWARD_TYPES} for regression")
         if task == "classification" and reward_type not in self._CLASSIFICATION_REWARD_TYPES:
@@ -85,10 +76,10 @@ class BaseVariableSelectionEnv(gym.Env):
         self.reward_type = reward_type
         
         if task == "regression":
-            self.model = Ridge(alpha=model_alpha, random_state=random_state)
+            self.model = LinearRegression()
         else:
             self.model = LogisticRegression(
-                C=1.0 / max(model_alpha, 1e-6),
+                penalty="none",
                 random_state=random_state,
                 max_iter=1000,
             )
@@ -97,45 +88,56 @@ class BaseVariableSelectionEnv(gym.Env):
         # g-prior hyperparameter for Bayes factor: g = max(p², n) (Liang et al. 2008)
         self._g_prior = max(self.n_features ** 2, self.n_samples)
     
-    def _compute_log_likelihood(self, rss: float, n: int) -> float:
+    def _compute_log_likelihood(
+        self,
+        *,
+        rss: Optional[float] = None,
+        n: Optional[int] = None,
+        X_selected: Optional[np.ndarray] = None,
+    ) -> float:
         """
-        Compute log-likelihood for linear regression with Gaussian errors.
-        
-        Under the assumption y ~ N(Xβ, σ²I), the log-likelihood is:
-            LL = -n/2 * log(2π) - n/2 * log(σ²) - RSS/(2σ²)
-        
-        Using MLE estimate σ² = RSS/n:
-            LL = -n/2 * [log(2π) + log(RSS/n) + 1]
+        Compute log-likelihood for regression or classification.
+
+        Regression: pass rss and n (Gaussian linear model, σ² = RSS/n).
+        Classification: pass X_selected. If None or shape (n, 0), null model (p = mean(y), no fit).
+        Otherwise self.model must be already fitted on X_selected and self.y.
         """
-        sigma2_mle = max(rss / n, 1e-12)
-        log_lik = -n / 2 * (np.log(2 * np.pi) + np.log(sigma2_mle) + 1)
-        return log_lik
+        if rss is not None and n is not None:
+            sigma2_mle = max(rss / n, 1e-12)
+            return -n / 2 * (np.log(2 * np.pi) + np.log(sigma2_mle) + 1)
+        if X_selected is None or (
+            isinstance(X_selected, np.ndarray)
+            and (X_selected.ndim < 2 or X_selected.shape[1] == 0)
+        ):
+            # Binary null: p = mean(y), no logistic fit. log L = sum( y*log(p) + (1-y)*log(1-p) )
+            y_bin = (self.y == np.unique(self.y)[1]).astype(np.float64)
+            p = np.mean(y_bin)
+            return np.sum(
+                y_bin * np.log(p + 1e-12) + (1 - y_bin) * np.log(1 - p + 1e-12)
+            )
+        if X_selected is not None:
+            # Binary logistic: log L = sum( y*log(p) + (1-y)*log(1-p) ), p = P(Y=1)
+            proba = self.model.predict_proba(X_selected)
+            p = proba[:, 1]
+            y_bin = (self.y == self.model.classes_[1]).astype(np.float64)
+            return np.sum(
+                y_bin * np.log(p + 1e-12) + (1 - y_bin) * np.log(1 - p + 1e-12)
+            )
+        raise ValueError("Provide (rss, n) or X_selected for classification.")
     
-    def _compute_aic(self, rss: float, n: int, p_gamma: int) -> float:
+    def _compute_aic(self, log_lik: float, p_gamma: int) -> float:
         """
-        Compute AIC (Akaike Information Criterion).
-        
-        From the write-up:
-            AIC(γ) = -log(L̂_γ) + p_γ
-        
-        where p_γ is the number of features included.
-        Lower AIC is better (we minimize AIC).
+        AIC = -log(L̂) + p_γ. Used for both regression and classification.
+        Lower AIC is better (we minimize AIC); reward = -AIC.
         """
-        log_lik = self._compute_log_likelihood(rss, n)
         return -log_lik + p_gamma
     
-    def _compute_bic(self, rss: float, n: int, p_gamma: int) -> float:
+    def _compute_bic(self, log_lik: float, p_gamma: int) -> float:
         """
-        Compute BIC (Bayesian Information Criterion).
-        
-        From the write-up:
-            BIC(γ) = -log(L̂_γ) + (p_γ / 2) * log(n)
-        
-        where p_γ is the number of features included.
-        Lower BIC is better (we minimize BIC).
+        BIC = -log(L̂) + (p_γ / 2) * log(n). Used for both regression and classification.
+        Lower BIC is better; reward = -BIC.
         """
-        log_lik = self._compute_log_likelihood(rss, n)
-        return -log_lik + (p_gamma / 2) * np.log(n)
+        return -log_lik + (p_gamma / 2) * np.log(self.n_samples)
     
     def _compute_log_bayes_factor(self, r2: float, n: int, p_gamma: int) -> float:
         """
@@ -165,168 +167,99 @@ class BaseVariableSelectionEnv(gym.Env):
         log_bf = term1 - term2
         
         return log_bf
-    
+
     def _compute_reward(self, selected_indices: np.ndarray) -> float:
         """
         Compute reward for a given feature selection.
-        Regression: reward = r2 - penalty (or -mse - penalty).
-        Classification: reward = accuracy/f1/roc_auc - penalty.
+        Regression: reward = objective (cv_rmse, -aic, -bic, or log bayes_factor; no extra sparsity).
+        Classification: reward = cv_auc, -aic, or -bic.
         """
         n_selected = len(selected_indices)
         n = self.n_samples
         
         if n_selected == 0:
-            # No features: regression = fit intercept only; classification = majority class
-            X_dummy = np.zeros((self.n_samples, 1))
+            # No features: regression = intercept only (mean of y); classification = majority class
             if self.task == "regression":
-                self.model.fit(X_dummy, self.y)
-                y_pred = self.model.predict(X_dummy)
-                rss = np.sum((self.y - y_pred) ** 2)
-                r2_0 = r2_score(self.y, y_pred) if self.n_samples > 1 else 0.0
-                if self.reward_type == "r2":
-                    if self.use_cv:
-                        scores = cross_val_score(
-                            self.model, X_dummy, self.y, cv=self.cv_folds, scoring="r2"
-                        )
-                        performance = scores.mean()
-                    else:
-                        performance = r2_0
-                elif self.reward_type == "mse":
-                    if self.use_cv:
-                        scores = cross_val_score(
-                            self.model, X_dummy, self.y, cv=self.cv_folds,
-                            scoring="neg_mean_squared_error",
-                        )
-                        performance = scores.mean()  # Already negative
-                    else:
-                        performance = -mean_squared_error(self.y, y_pred)
-                elif self.reward_type == "cv_rmse":
-                    if self.use_cv:
-                        scores = cross_val_score(
-                            self.model, X_dummy, self.y, cv=self.cv_folds,
-                            scoring="neg_mean_squared_error",
-                        )
-                        performance = -np.sqrt(max(-scores.mean(), 1e-12))
-                    else:
-                        performance = -np.sqrt(rss / max(self.n_samples, 1))
-                elif self.reward_type == "aic":
-                    # Null model: p_γ = 0 (no features selected)
-                    aic = self._compute_aic(rss, n, p_gamma=0)
-                    performance = -aic
-                elif self.reward_type == "bic":
-                    # Null model: p_γ = 0 (no features selected)
-                    bic = self._compute_bic(rss, n, p_gamma=0)
-                    performance = -bic
+                y_mean = np.mean(self.y)
+                rss = np.sum((self.y - y_mean) ** 2)
+                if self.reward_type == "cv_rmse":
+                    # K-fold CV RMSE for intercept-only: in each fold, predict with mean(y_train)
+                    kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+                    mses = []
+                    for train_idx, val_idx in kf.split(self.y):
+                        mean_train = np.mean(self.y[train_idx])
+                        mses.append(np.mean((self.y[val_idx] - mean_train) ** 2))
+                    reward = -np.sqrt(max(np.mean(mses), 1e-12))
+                elif self.reward_type in ("aic", "bic"):
+                    log_lik = self._compute_log_likelihood(rss=rss, n=n)
+                    reward = (
+                        -self._compute_aic(log_lik, p_gamma=n_selected)
+                        if self.reward_type == "aic"
+                        else -self._compute_bic(log_lik, p_gamma=n_selected)
+                    )
                 elif self.reward_type == "bayes_factor":
-                    # BF of null vs null = 1, log(BF) = 0
-                    performance = 0.0
-                else:
-                    performance = r2_0
+                    reward = 0.0
+                return reward
             else:
-                # Classification: majority class baseline
-                from collections import Counter
-                majority = Counter(self.y).most_common(1)[0][0]
-                y_pred = np.full_like(self.y, majority)
-                if self.reward_type == "accuracy":
-                    performance = accuracy_score(self.y, y_pred)
-                elif self.reward_type == "f1_weighted":
-                    performance = f1_score(self.y, y_pred, average="weighted", zero_division=0)
-                else:
-                    performance = accuracy_score(self.y, y_pred)
-            return performance - self.sparsity_penalty * 0
+                # Classification, n_selected==0
+                if self.reward_type == "cv_auc":
+                    # No features: constant predictor; AUC = 0.5
+                    reward = 0.5
+                elif self.reward_type in ("aic", "bic"):
+                    log_lik = self._compute_log_likelihood(X_selected=None)
+                    reward = (
+                        -self._compute_aic(log_lik, p_gamma=n_selected)
+                        if self.reward_type == "aic"
+                        else -self._compute_bic(log_lik, p_gamma=n_selected)
+                    )
+                return reward
         
         cache_key = tuple(sorted(selected_indices))
         if cache_key in self.cache:
-            performance = self.cache[cache_key]
-        else:
-            X_selected = self.X[:, selected_indices]
-            if self.task == "regression":
-                self.model.fit(X_selected, self.y)
-                y_pred = self.model.predict(X_selected)
-                rss = np.sum((self.y - y_pred) ** 2)
-                r2 = r2_score(self.y, y_pred) if self.n_samples > 1 else 0.0
-                p_g = n_selected
-                
-                if self.reward_type == "r2":
-                    if self.use_cv:
-                        scores = cross_val_score(
-                            self.model, X_selected, self.y, cv=self.cv_folds, scoring="r2"
-                        )
-                        performance = scores.mean()
-                    else:
-                        performance = r2
-                elif self.reward_type == "mse":
-                    if self.use_cv:
-                        scores = cross_val_score(
-                            self.model, X_selected, self.y, cv=self.cv_folds,
-                            scoring="neg_mean_squared_error",
-                        )
-                        performance = scores.mean()  # Already negative
-                    else:
-                        performance = -mean_squared_error(self.y, y_pred)
-                elif self.reward_type == "cv_rmse":
-                    if self.use_cv:
-                        scores = cross_val_score(
-                            self.model, X_selected, self.y, cv=self.cv_folds,
-                            scoring="neg_mean_squared_error",
-                        )
-                        performance = -np.sqrt(max(-scores.mean(), 1e-12))
-                    else:
-                        performance = -np.sqrt(rss / max(self.n_samples, 1))
-                elif self.reward_type == "aic":
-                    # p_γ = number of selected features
-                    aic = self._compute_aic(rss, n, p_gamma=p_g)
-                    performance = -aic
-                elif self.reward_type == "bic":
-                    # p_γ = number of selected features
-                    bic = self._compute_bic(rss, n, p_gamma=p_g)
-                    performance = -bic
-                elif self.reward_type == "bayes_factor":
-                    # Bayes factor under g-prior (Liang et al. 2008)
-                    # Uses R² and the closed-form marginal likelihood
-                    performance = self._compute_log_bayes_factor(r2, n, p_gamma=p_g)
-                else:
-                    performance = r2
-            else:
-                if self.use_cv:
-                    scoring = self.reward_type  # accuracy, f1_weighted, roc_auc
-                    scores = cross_val_score(
-                        self.model, X_selected, self.y, cv=self.cv_folds, scoring=scoring
-                    )
-                    performance = scores.mean()
-                else:
-                    self.model.fit(X_selected, self.y)
-                    y_pred = self.model.predict(X_selected)
-                    if self.reward_type == "accuracy":
-                        performance = accuracy_score(self.y, y_pred)
-                    elif self.reward_type == "f1_weighted":
-                        performance = f1_score(self.y, y_pred, average="weighted", zero_division=0)
-                    elif self.reward_type == "roc_auc" and hasattr(self.model, "predict_proba"):
-                        from sklearn.metrics import roc_auc_score
-                        try:
-                            proba = self.model.predict_proba(X_selected)
-                            performance = roc_auc_score(self.y, proba, multi_class="ovr", average="weighted")
-                        except Exception:
-                            performance = accuracy_score(self.y, y_pred)
-                    else:
-                        performance = accuracy_score(self.y, y_pred)
-            self.cache[cache_key] = performance
-        
+            return self.cache[cache_key]
+
+        X_selected = self.X[:, selected_indices]
         if self.task == "regression":
-            # cv_rmse, aic, bic, bayes_factor already encode complexity; no extra sparsity term
-            if self.reward_type in ("cv_rmse", "aic", "bic", "bayes_factor"):
-                reward = performance
-            elif self.reward_type in ("r2", "mse"):
-                # For r2: higher is better, performance is R² (positive)
-                # For mse: lower is better, performance is -MSE (negative)
-                # Both cases: reward = performance - penalty
-                reward = performance - self.sparsity_penalty * n_selected
-            else:
-                reward = performance - self.sparsity_penalty * n_selected
+            self.model.fit(X_selected, self.y)
+            y_pred = self.model.predict(X_selected)
+            rss = np.sum((self.y - y_pred) ** 2)
+            r2 = r2_score(self.y, y_pred) if self.n_samples > 1 else 0.0
+            p_gamma = n_selected
+
+            if self.reward_type == "cv_rmse":
+                scores = cross_val_score(
+                    self.model, X_selected, self.y, cv=self.cv_folds,
+                    scoring="neg_mean_squared_error",
+                )
+                reward = -np.sqrt(max(-scores.mean(), 1e-12))
+            elif self.reward_type == "aic":
+                log_lik = self._compute_log_likelihood(rss=rss, n=n)
+                reward = -self._compute_aic(log_lik, p_gamma)
+            elif self.reward_type == "bic":
+                log_lik = self._compute_log_likelihood(rss=rss, n=n)
+                reward = -self._compute_bic(log_lik, p_gamma)
+            elif self.reward_type == "bayes_factor":
+                reward = self._compute_log_bayes_factor(r2, n, p_gamma=p_gamma)
         else:
-            reward = performance - self.sparsity_penalty * n_selected
+            # Classification: cv_auc, aic, or bic
+            if self.reward_type == "cv_auc":
+                scoring = "roc_auc_ovr" if len(np.unique(self.y)) > 2 else "roc_auc"
+                scores = cross_val_score(
+                    self.model, X_selected, self.y, cv=self.cv_folds, scoring=scoring
+                )
+                reward = scores.mean()
+            elif self.reward_type == "aic":
+                self.model.fit(X_selected, self.y)
+                log_lik = self._compute_log_likelihood(X_selected=X_selected)
+                reward = -self._compute_aic(log_lik, n_selected)
+            elif self.reward_type == "bic":
+                self.model.fit(X_selected, self.y)
+                log_lik = self._compute_log_likelihood(X_selected=X_selected)
+                reward = -self._compute_bic(log_lik, n_selected)
+
+        self.cache[cache_key] = reward
         return reward
-    
+
     def clear_cache(self) -> None:
         """Clear the reward cache."""
         self.cache.clear()

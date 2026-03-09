@@ -25,21 +25,15 @@ class VariableSelectionEnv(BaseVariableSelectionEnv):
         X: np.ndarray,
         y: np.ndarray,
         task: str = "regression",
-        sparsity_penalty: float = 0.01,
         reward_type: Optional[str] = None,
-        use_cv: bool = True,
-        cv_folds: int = 3,
-        model_alpha: float = 1.0,
+        cv_folds: int = 5,
         random_state: Optional[int] = None,
     ):
         super().__init__(
             X=X, y=y,
             task=task,
-            sparsity_penalty=sparsity_penalty,
             reward_type=reward_type,
-            use_cv=use_cv,
             cv_folds=cv_folds,
-            model_alpha=model_alpha,
             random_state=random_state,
         )
         

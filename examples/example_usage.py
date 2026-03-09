@@ -55,10 +55,8 @@ def main():
     env = VariableSelectionEnv(
         X_train,
         y_train,
-        sparsity_penalty=0.01,
-        reward_type="r2",
-        use_cv=True,
-        cv_folds=3,
+        reward_type="cv_rmse",
+        cv_folds=5,
         random_state=42,
     )
     

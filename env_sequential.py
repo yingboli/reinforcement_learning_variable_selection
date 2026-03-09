@@ -2,7 +2,7 @@
 Sequential MDP environment for variable selection.
 
 Agent adds/removes features one at a time; state is current selection (meaningful).
-Supports action masking (info["action_mask"]) and an optional stop action.
+Supports action masking (info["action_mask"]). Episodes run for max_episode_steps (no stop action).
 """
 
 import numpy as np
@@ -57,7 +57,7 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
     Sequential MDP for variable selection.
     
     The agent toggles or adds/removes one feature per step. State is the
-    current binary feature selection. With gamma=0, only immediate rewards matter.
+    current binary feature selection. Episodes run for max_episode_steps (no stop action).
     If max_episode_steps is None, it defaults to min(max(50, 2*n_features), 500)
     so that large n_features get enough steps.
     
@@ -66,9 +66,7 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
       already in, remove when not in) are no-ops and yield a small penalty;
       info["action_mask"] gives valid actions (True = valid) for use with
       maskable policies.
-    - action_type "toggle": actions 0..n_features-1 = toggle feature j. If
-      include_stop_action=True, action n_features = stop (terminate with current
-      selection).
+    - action_type "toggle": actions 0..n_features-1 = toggle feature j.
     """
     
     def __init__(
@@ -76,25 +74,18 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         X: np.ndarray,
         y: np.ndarray,
         task: str = "regression",
-        sparsity_penalty: float = 0.01,
         reward_type: Optional[str] = None,
-        use_cv: bool = True,
-        cv_folds: int = 3,
+        cv_folds: int = 5,
         max_episode_steps: Optional[int] = None,
-        model_alpha: float = 1.0,
         action_type: str = "toggle",
-        include_stop_action: bool = True,
         invalid_action_penalty: float = 0.01,
         random_state: Optional[int] = None,
     ):
         super().__init__(
             X=X, y=y,
             task=task,
-            sparsity_penalty=sparsity_penalty,
             reward_type=reward_type,
-            use_cv=use_cv,
             cv_folds=cv_folds,
-            model_alpha=model_alpha,
             random_state=random_state,
         )
         
@@ -106,14 +97,11 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
             max_episode_steps = min(max(50, 2 * self.n_features), 500)
         self.max_episode_steps = max_episode_steps
         self.action_type = action_type
-        self.include_stop_action = include_stop_action
         self.invalid_action_penalty = invalid_action_penalty
         self.state = np.zeros(self.n_features, dtype=np.int8)
         self.current_step = 0
         
         n_actions = self.n_features if action_type == "toggle" else 2 * self.n_features
-        if include_stop_action:
-            n_actions += 1
         self.action_space = spaces.Discrete(n_actions)
         
         self.observation_space = spaces.Box(
@@ -136,7 +124,6 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
             for j in range(self.n_features):
                 mask[j] = self.state[j] == 0
                 mask[self.n_features + j] = self.state[j] == 1
-        # stop action (if present) is always valid
         return mask
     
     def reset(
@@ -166,27 +153,6 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
     def step(
         self, action: int
     ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        stop_action_idx = (
-            (self.n_features if self.action_type == "toggle" else 2 * self.n_features)
-            if self.include_stop_action else None
-        )
-        
-        if self.include_stop_action and action == stop_action_idx:
-            # Stop: terminate with current selection
-            selected_indices = np.where(self.state == 1)[0]
-            reward = self._compute_reward(selected_indices)
-            obs = self._get_observation()
-            info = {
-                "n_selected": len(selected_indices),
-                "selected_features": selected_indices.tolist(),
-                "reward": reward,
-                "step": self.current_step,
-                "action": action,
-                "action_mask": self._get_action_mask(),
-                "stopped": True,
-            }
-            return obs, reward, True, False, info
-        
         invalid = False
         if self.action_type == "toggle":
             self.state[action] = 1 - self.state[action]
@@ -217,7 +183,6 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
             "step": self.current_step,
             "action": action,
             "action_mask": self._get_action_mask(),
-            "stopped": False,
         }
         return obs, reward, terminated, False, info
     

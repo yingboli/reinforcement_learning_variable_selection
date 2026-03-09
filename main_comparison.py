@@ -70,14 +70,13 @@ def load_data(
 def train_and_evaluate_bandit(
     X_train, y_train, X_test, y_test,
     task="regression",
-    sparsity_penalty=0.01,
     reward_type=None,
     total_timesteps=10000,
     learning_rate=3e-4,
 ):
     """Train and evaluate bandit approach."""
     if reward_type is None:
-        reward_type = "r2" if task == "regression" else "accuracy"
+        reward_type = "cv_rmse" if task == "regression" else "cv_auc"
     print("\n" + "="*60)
     print("BANDIT APPROACH (One-step MDP)")
     print("="*60)
@@ -85,9 +84,9 @@ def train_and_evaluate_bandit(
     env = VariableSelectionEnv(
         X_train, y_train,
         task=task,
-        sparsity_penalty=sparsity_penalty,
         reward_type=reward_type,
-        use_cv=True, cv_folds=3, random_state=42,
+        cv_folds=5,
+        random_state=42,
     )
     
     # Create agent
@@ -117,7 +116,6 @@ def train_and_evaluate_bandit(
 def train_and_evaluate_sequential(
     X_train, y_train, X_test, y_test,
     task="regression",
-    sparsity_penalty=0.01,
     reward_type=None,
     total_timesteps=10000,
     learning_rate=3e-4,
@@ -126,19 +124,19 @@ def train_and_evaluate_sequential(
 ):
     """Train and evaluate sequential MDP approach."""
     if reward_type is None:
-        reward_type = "r2" if task == "regression" else "accuracy"
+        reward_type = "cv_rmse" if task == "regression" else "cv_auc"
     print("\n" + "="*60)
-    print("SEQUENTIAL MDP APPROACH (Multi-step, gamma=0)")
+    print("SEQUENTIAL MDP APPROACH (Multi-step, gamma=1)")
     print("="*60)
     
     env = SequentialVariableSelectionEnv(
         X_train, y_train,
         task=task,
-        sparsity_penalty=sparsity_penalty,
         reward_type=reward_type,
-        use_cv=True, cv_folds=3,
+        cv_folds=5,
         max_episode_steps=max_episode_steps,
-        action_type=action_type, random_state=42,
+        action_type=action_type,
+        random_state=42,
     )
     
     # Create agent (higher ent_coef and n_steps for better exploration in sequential MDP)
@@ -148,7 +146,7 @@ def train_and_evaluate_sequential(
         n_steps=4096,
         batch_size=128,
         n_epochs=10,
-        gamma=0.0,  # No future discounting
+        gamma=1.0,
         ent_coef=0.02,
         verbose=1,
         seed=42,
@@ -200,16 +198,10 @@ def main():
         help="Number of features (for synthetic data)",
     )
     parser.add_argument(
-        "--sparsity_penalty",
-        type=float,
-        default=0.01,
-        help="Sparsity penalty coefficient",
-    )
-    parser.add_argument(
         "--reward_type",
         type=str,
         default=None,
-        help="Reward: regression: r2, mse; classification: accuracy, f1_weighted, roc_auc",
+        help="Reward: regression: cv_rmse, aic, bic, bayes_factor; classification: cv_auc, aic, bic",
     )
     parser.add_argument(
         "--total_timesteps",
@@ -278,7 +270,6 @@ def main():
     bandit_features, bandit_results, bandit_agent, bandit_env = train_and_evaluate_bandit(
         X_train, y_train, X_test, y_test,
         task=args.task,
-        sparsity_penalty=args.sparsity_penalty,
         reward_type=args.reward_type,
         total_timesteps=args.total_timesteps,
         learning_rate=args.learning_rate,
@@ -297,7 +288,6 @@ def main():
     seq_features, seq_results, seq_agent, seq_env = train_and_evaluate_sequential(
         X_train, y_train, X_test, y_test,
         task=args.task,
-        sparsity_penalty=args.sparsity_penalty,
         reward_type=args.reward_type,
         total_timesteps=args.total_timesteps,
         learning_rate=args.learning_rate,

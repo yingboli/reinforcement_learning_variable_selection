@@ -133,7 +133,6 @@ def run_single_simulation(
     n_informative: int,
     n_fake: int,
     noise: float,
-    sparsity_penalty: float,
     total_timesteps: int,
     random_state: int,
     verbose: int = 0,
@@ -176,7 +175,6 @@ def run_single_simulation(
         "n_fake": n_fake,
         "n_total_features": n_features,
         "noise": noise,
-        "sparsity_penalty": sparsity_penalty,
         "total_timesteps": total_timesteps,
         "formula": formula,
         "true_features": sorted(true_features.tolist()),
@@ -195,10 +193,8 @@ def run_single_simulation(
     bandit_start = time.time()
     env_bandit = VariableSelectionEnv(
         X_train_scaled, y_train_scaled,
-        sparsity_penalty=sparsity_penalty,
-        reward_type="r2",
-        use_cv=True,
-        cv_folds=3,
+        reward_type="cv_rmse",
+        cv_folds=5,
         random_state=random_state,
     )
     
@@ -241,10 +237,8 @@ def run_single_simulation(
     seq_start = time.time()
     env_seq = SequentialVariableSelectionEnv(
         X_train_scaled, y_train_scaled,
-        sparsity_penalty=sparsity_penalty,
-        reward_type="r2",
-        use_cv=True,
-        cv_folds=3,
+        reward_type="cv_rmse",
+        cv_folds=5,
         max_episode_steps=min(max(50, 2 * n_features), 200),
         random_state=random_state,
     )
@@ -252,7 +246,7 @@ def run_single_simulation(
     agent_seq = SequentialVariableSelectionPPO(
         env_seq,
         learning_rate=3e-4,
-        gamma=0.0,
+        gamma=1.0,
         verbose=verbose,
         seed=random_state,
     )
@@ -406,7 +400,6 @@ def run_simulation_suite(output_dir: str = "./results", verbose: int = 1, n_runs
                 n_informative=config["n_informative"],
                 n_fake=config["n_fake"],
                 noise=config["noise"],
-                sparsity_penalty=0.01,
                 total_timesteps=config.get("timesteps", 10000),
                 random_state=42 + i * 1000 + run_idx,
                 verbose=0,  # Suppress per-run output
@@ -526,7 +519,7 @@ Each configuration was run **{n_runs} times** with different random seeds to com
 | Method | Stopping Criteria | Convergence Check |
 |--------|-------------------|-------------------|
 | **Bandit MDP** | Fixed timesteps (15,000-20,000) | No early stopping; runs for full timesteps |
-| **Sequential MDP** | Fixed timesteps (15,000-20,000) | No early stopping; gamma=0 (immediate reward only) |
+| **Sequential MDP** | Fixed timesteps (15,000-20,000) | No early stopping; gamma=1 (discounted returns) |
 | **LassoCV** | Cross-validation convergence | Automatic via sklearn (max_iter=2000, cv=5) |
 | **RFE** | All features ranked | Deterministic; selects exactly n_informative features |
 

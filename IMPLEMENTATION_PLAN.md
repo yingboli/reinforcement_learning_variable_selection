@@ -51,5 +51,5 @@ To run simulations with known truth: generate data from a sparse linear model, r
 
 1. **Simulation script**: Add `scripts/run_simulation.py` that generates data with known γ*, runs bandit/MDP and baselines, reports selection F1 and test RMSE.
 2. **TabRED loader**: Add `data/tabred.py` or document how to load TabRED datasets and call existing `main.py` / `main_comparison.py` with the same interface (train/test splits, scaling).
-3. **Reward_type in CLI**: Ensure `--reward_type` help lists all options (r2, mse, cv_rmse, aic, bic, bayes_factor for regression).
+3. **Reward_type in CLI**: Ensure `--reward_type` help lists all options (cv_rmse, aic, bic, bayes_factor for regression).
 4. **Experiments**: Run full comparison (bandit vs MDP, multiple reward types, baselines) on synthetic and TabRED as in the plan.

@@ -1,5 +1,5 @@
 """
-PPO agent for sequential variable selection (multi-step MDP, gamma=0).
+PPO agent for sequential variable selection (multi-step MDP, gamma=1).
 """
 
 import numpy as np
@@ -68,7 +68,7 @@ def _default_policy_kwargs_for_n_features(n_features: int) -> Dict[str, Any]:
 
 class SequentialVariableSelectionPPO(BaseVariableSelectionPPO):
     """
-    PPO agent for sequential variable selection (multi-step, gamma=0).
+    PPO agent for sequential variable selection (multi-step, gamma=1).
     For large n_features (e.g. 500), pass policy_kwargs from
     _default_policy_kwargs_for_n_features(n_features) so pi/vf scale appropriately.
     """
@@ -80,7 +80,7 @@ class SequentialVariableSelectionPPO(BaseVariableSelectionPPO):
         n_steps: int = 2048,
         batch_size: int = 64,
         n_epochs: int = 10,
-        gamma: float = 0.0,
+        gamma: float = 1.0,
         gae_lambda: float = 0.95,
         clip_range: float = 0.2,
         ent_coef: float = 0.01,

@@ -60,7 +60,6 @@ Classification reward types: `accuracy`, `f1_weighted`, `roc_auc`. Datasets: `sy
 - `--dataset`: Regression: `synthetic`, `diabetes`, `california`. Classification: `synthetic`, `breast_cancer`
 - `--n_samples`: Number of samples (for synthetic data, default: 200)
 - `--n_features`: Number of features (for synthetic data, default: 50)
-- `--sparsity_penalty`: Sparsity penalty coefficient α (default: 0.01)
 - `--reward_type`: Regression: `r2` or `mse`. Classification: `accuracy`, `f1_weighted`, `roc_auc`. Default: `r2` / `accuracy`
 - `--total_timesteps`: Total training timesteps (default: 10000)
 - `--max_episode_steps`: Maximum steps per episode (default: 50)
@@ -74,7 +73,6 @@ Classification reward types: `accuracy`, `f1_weighted`, `roc_auc`. Datasets: `sy
 python main.py \
     --dataset synthetic \
     --n_features 100 \
-    --sparsity_penalty 0.02 \
     --reward_type r2 \
     --total_timesteps 50000 \
     --learning_rate 1e-4 \
@@ -115,7 +113,6 @@ X, y = make_regression(n_samples=200, n_features=50, n_informative=5, random_sta
 # Create environment
 env = VariableSelectionEnv(
     X, y,
-    sparsity_penalty=0.01,
     reward_type="r2",
     use_cv=True,
     cv_folds=3
@@ -138,7 +135,7 @@ from agent_bandit import VariableSelectionPPO
 from env_bandit import VariableSelectionEnv
 
 # Create environment
-env = VariableSelectionEnv(X_train, y_train, sparsity_penalty=0.01)
+env = VariableSelectionEnv(X_train, y_train)
 
 # Create agent
 agent = VariableSelectionPPO(env, learning_rate=3e-4)
@@ -221,10 +218,6 @@ print(comparison_df)
 
 Key hyperparameters to tune:
 
-- **sparsity_penalty** (α): Controls trade-off between model performance and sparsity
-  - Higher values encourage fewer features
-  - Typical range: 0.001 - 0.1
-  
 - **reward_type**: `r2` (bounded, more stable) or `mse` (unbounded)
   
 - **learning_rate**: PPO learning rate (typically 1e-4 to 1e-3)
