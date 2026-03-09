@@ -93,10 +93,78 @@ class BaseVariableSelectionEnv(gym.Env):
                 max_iter=1000,
             )
         self.cache = {}
-        self._n = self.n_samples
-        self._p_total = self.n_features
-        # g-prior for Bayes factor: g = max(p^2, n) (Liang et al.)
-        self._g_prior = max(self._p_total ** 2, self._n) if self.task == "regression" else None
+        
+        # g-prior hyperparameter for Bayes factor: g = max(p², n) (Liang et al. 2008)
+        self._g_prior = max(self.n_features ** 2, self.n_samples)
+    
+    def _compute_log_likelihood(self, rss: float, n: int) -> float:
+        """
+        Compute log-likelihood for linear regression with Gaussian errors.
+        
+        Under the assumption y ~ N(Xβ, σ²I), the log-likelihood is:
+            LL = -n/2 * log(2π) - n/2 * log(σ²) - RSS/(2σ²)
+        
+        Using MLE estimate σ² = RSS/n:
+            LL = -n/2 * [log(2π) + log(RSS/n) + 1]
+        """
+        sigma2_mle = max(rss / n, 1e-12)
+        log_lik = -n / 2 * (np.log(2 * np.pi) + np.log(sigma2_mle) + 1)
+        return log_lik
+    
+    def _compute_aic(self, rss: float, n: int, p_gamma: int) -> float:
+        """
+        Compute AIC (Akaike Information Criterion).
+        
+        From the write-up:
+            AIC(γ) = -log(L̂_γ) + p_γ
+        
+        where p_γ is the number of features included.
+        Lower AIC is better (we minimize AIC).
+        """
+        log_lik = self._compute_log_likelihood(rss, n)
+        return -log_lik + p_gamma
+    
+    def _compute_bic(self, rss: float, n: int, p_gamma: int) -> float:
+        """
+        Compute BIC (Bayesian Information Criterion).
+        
+        From the write-up:
+            BIC(γ) = -log(L̂_γ) + (p_γ / 2) * log(n)
+        
+        where p_γ is the number of features included.
+        Lower BIC is better (we minimize BIC).
+        """
+        log_lik = self._compute_log_likelihood(rss, n)
+        return -log_lik + (p_gamma / 2) * np.log(n)
+    
+    def _compute_log_bayes_factor(self, r2: float, n: int, p_gamma: int) -> float:
+        """
+        Compute log Bayes factor under g-prior (Liang et al. 2008).
+        
+        From the write-up, comparing model γ to null model γ∅:
+            BF_{γ:γ∅} = (1 + g)^{(n - p_γ - 1)/2} * [1 + g(1 - R²_γ)]^{-(n-1)/2}
+        
+        where:
+            - g = max(p², n) is the g-prior hyperparameter
+            - p_γ is the number of features in model γ
+            - R²_γ is the coefficient of determination
+            - n is the sample size
+        
+        We return log(BF) for numerical stability. Higher is better (we maximize BF).
+        """
+        g = self._g_prior
+        
+        # Clip R² to avoid numerical issues at boundaries
+        r2_safe = np.clip(r2, 1e-10, 1 - 1e-10)
+        
+        # Compute log(BF) for numerical stability
+        # log(BF) = ((n - p_γ - 1) / 2) * log(1 + g) - ((n - 1) / 2) * log(1 + g(1 - R²))
+        term1 = ((n - p_gamma - 1) / 2) * np.log(1 + g)
+        term2 = ((n - 1) / 2) * np.log(1 + g * (1 - r2_safe))
+        
+        log_bf = term1 - term2
+        
+        return log_bf
     
     def _compute_reward(self, selected_indices: np.ndarray) -> float:
         """
@@ -105,6 +173,7 @@ class BaseVariableSelectionEnv(gym.Env):
         Classification: reward = accuracy/f1/roc_auc - penalty.
         """
         n_selected = len(selected_indices)
+        n = self.n_samples
         
         if n_selected == 0:
             # No features: regression = fit intercept only; classification = majority class
@@ -115,9 +184,22 @@ class BaseVariableSelectionEnv(gym.Env):
                 rss = np.sum((self.y - y_pred) ** 2)
                 r2_0 = r2_score(self.y, y_pred) if self.n_samples > 1 else 0.0
                 if self.reward_type == "r2":
-                    performance = r2_0
+                    if self.use_cv:
+                        scores = cross_val_score(
+                            self.model, X_dummy, self.y, cv=self.cv_folds, scoring="r2"
+                        )
+                        performance = scores.mean()
+                    else:
+                        performance = r2_0
                 elif self.reward_type == "mse":
-                    performance = -mean_squared_error(self.y, y_pred)
+                    if self.use_cv:
+                        scores = cross_val_score(
+                            self.model, X_dummy, self.y, cv=self.cv_folds,
+                            scoring="neg_mean_squared_error",
+                        )
+                        performance = scores.mean()  # Already negative
+                    else:
+                        performance = -mean_squared_error(self.y, y_pred)
                 elif self.reward_type == "cv_rmse":
                     if self.use_cv:
                         scores = cross_val_score(
@@ -128,15 +210,18 @@ class BaseVariableSelectionEnv(gym.Env):
                     else:
                         performance = -np.sqrt(rss / max(self.n_samples, 1))
                 elif self.reward_type == "aic":
-                    # AIC = n*log(RSS/n) + 2*p_γ, p_γ=0
-                    performance = -self.n_samples * np.log(max(rss / self.n_samples, 1e-12))
+                    # Null model: p_γ = 0 (no features selected)
+                    aic = self._compute_aic(rss, n, p_gamma=0)
+                    performance = -aic
                 elif self.reward_type == "bic":
-                    performance = -self.n_samples * np.log(max(rss / self.n_samples, 1e-12))
+                    # Null model: p_γ = 0 (no features selected)
+                    bic = self._compute_bic(rss, n, p_gamma=0)
+                    performance = -bic
                 elif self.reward_type == "bayes_factor":
-                    # BF null vs null: 1, log(BF)=0
+                    # BF of null vs null = 1, log(BF) = 0
                     performance = 0.0
                 else:
-                    performance = r2_0 if self.reward_type == "r2" else -mean_squared_error(self.y, y_pred)
+                    performance = r2_0
             else:
                 # Classification: majority class baseline
                 from collections import Counter
@@ -161,10 +246,24 @@ class BaseVariableSelectionEnv(gym.Env):
                 rss = np.sum((self.y - y_pred) ** 2)
                 r2 = r2_score(self.y, y_pred) if self.n_samples > 1 else 0.0
                 p_g = n_selected
+                
                 if self.reward_type == "r2":
-                    performance = r2
+                    if self.use_cv:
+                        scores = cross_val_score(
+                            self.model, X_selected, self.y, cv=self.cv_folds, scoring="r2"
+                        )
+                        performance = scores.mean()
+                    else:
+                        performance = r2
                 elif self.reward_type == "mse":
-                    performance = -mean_squared_error(self.y, y_pred)
+                    if self.use_cv:
+                        scores = cross_val_score(
+                            self.model, X_selected, self.y, cv=self.cv_folds,
+                            scoring="neg_mean_squared_error",
+                        )
+                        performance = scores.mean()  # Already negative
+                    else:
+                        performance = -mean_squared_error(self.y, y_pred)
                 elif self.reward_type == "cv_rmse":
                     if self.use_cv:
                         scores = cross_val_score(
@@ -175,29 +274,19 @@ class BaseVariableSelectionEnv(gym.Env):
                     else:
                         performance = -np.sqrt(rss / max(self.n_samples, 1))
                 elif self.reward_type == "aic":
-                    # AIC = n*log(RSS/n) + 2*p_γ; reward = -AIC
-                    aic = self.n_samples * np.log(max(rss / self.n_samples, 1e-12)) + 2 * p_g
+                    # p_γ = number of selected features
+                    aic = self._compute_aic(rss, n, p_gamma=p_g)
                     performance = -aic
                 elif self.reward_type == "bic":
-                    # BIC = n*log(RSS/n) + log(n)*p_γ; reward = -BIC
-                    bic = self.n_samples * np.log(max(rss / self.n_samples, 1e-12)) + np.log(max(self.n_samples, 1)) * p_g
+                    # p_γ = number of selected features
+                    bic = self._compute_bic(rss, n, p_gamma=p_g)
                     performance = -bic
                 elif self.reward_type == "bayes_factor":
-                    # BF_γ:γ∅ = (1+g)^((n-p_γ-1)/2) * [1+g(1-R²_γ)]^(-(n-1)/2), g=max(p²,n)
-                    r2_safe = np.clip(r2, 1e-10, 1 - 1e-10)
-                    bf = (1 + self._g_prior) ** ((self.n_samples - p_g - 1) / 2) * (
-                        1 + self._g_prior * (1 - r2_safe)
-                    ) ** (-(self.n_samples - 1) / 2)
-                    performance = np.log(max(bf, 1e-300))
+                    # Bayes factor under g-prior (Liang et al. 2008)
+                    # Uses R² and the closed-form marginal likelihood
+                    performance = self._compute_log_bayes_factor(r2, n, p_gamma=p_g)
                 else:
-                    if self.use_cv:
-                        scoring = "r2" if self.reward_type == "r2" else "neg_mean_squared_error"
-                        scores = cross_val_score(
-                            self.model, X_selected, self.y, cv=self.cv_folds, scoring=scoring
-                        )
-                        performance = scores.mean() if self.reward_type == "r2" else -scores.mean()
-                    else:
-                        performance = r2 if self.reward_type == "r2" else -mean_squared_error(self.y, y_pred)
+                    performance = r2
             else:
                 if self.use_cv:
                     scoring = self.reward_type  # accuracy, f1_weighted, roc_auc
@@ -227,10 +316,13 @@ class BaseVariableSelectionEnv(gym.Env):
             # cv_rmse, aic, bic, bayes_factor already encode complexity; no extra sparsity term
             if self.reward_type in ("cv_rmse", "aic", "bic", "bayes_factor"):
                 reward = performance
-            elif self.reward_type == "r2":
+            elif self.reward_type in ("r2", "mse"):
+                # For r2: higher is better, performance is R² (positive)
+                # For mse: lower is better, performance is -MSE (negative)
+                # Both cases: reward = performance - penalty
                 reward = performance - self.sparsity_penalty * n_selected
             else:
-                reward = -performance - self.sparsity_penalty * n_selected
+                reward = performance - self.sparsity_penalty * n_selected
         else:
             reward = performance - self.sparsity_penalty * n_selected
         return reward
