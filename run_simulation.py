@@ -372,10 +372,10 @@ def run_simulation_suite(output_dir: str = "./results", verbose: int = 1, n_runs
     output_path.mkdir(parents=True, exist_ok=True)
     
     configs = [
-        {"n_samples": 500, "n_informative": 5, "n_fake": 15, "noise": 5.0, "timesteps": 5000},
-        {"n_samples": 1000, "n_informative": 8, "n_fake": 22, "noise": 8.0, "timesteps": 5000},
-        {"n_samples": 2000, "n_informative": 10, "n_fake": 40, "noise": 10.0, "timesteps": 8000},
-        {"n_samples": 5000, "n_informative": 15, "n_fake": 35, "noise": 12.0, "timesteps": 10000},
+        {"n_samples": 500, "n_informative": 5, "n_fake": 15, "noise": 2.0, "timesteps": 5000},
+        {"n_samples": 1000, "n_informative": 8, "n_fake": 22, "noise": 2.0, "timesteps": 5000},
+        {"n_samples": 2000, "n_informative": 10, "n_fake": 40, "noise": 2.0, "timesteps": 8000},
+        {"n_samples": 5000, "n_informative": 15, "n_fake": 35, "noise": 2.0, "timesteps": 10000},
     ]
     
     all_results = []
