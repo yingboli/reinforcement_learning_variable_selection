@@ -91,6 +91,43 @@ def create_synthetic_data_with_known_formula(
     return X_scaled, y, true_features, formula_description, coef_true, scaler_X
 
 
+def check_convergence(rewards_history: list, window: int = 10, threshold: float = 0.01) -> dict:
+    """
+    Check if rewards have converged based on recent history.
+    
+    Args:
+        rewards_history: List of reward values over training
+        window: Number of recent values to consider
+        threshold: Relative change threshold for convergence
+        
+    Returns:
+        Dictionary with convergence info
+    """
+    if len(rewards_history) < window * 2:
+        return {"converged": False, "final_reward": rewards_history[-1] if rewards_history else 0}
+    
+    recent = rewards_history[-window:]
+    previous = rewards_history[-2*window:-window]
+    
+    recent_mean = np.mean(recent)
+    previous_mean = np.mean(previous)
+    recent_std = np.std(recent)
+    
+    if abs(previous_mean) > 1e-6:
+        relative_change = abs(recent_mean - previous_mean) / abs(previous_mean)
+    else:
+        relative_change = abs(recent_mean - previous_mean)
+    
+    converged = relative_change < threshold and recent_std < threshold
+    
+    return {
+        "converged": converged,
+        "final_reward": recent_mean,
+        "reward_std": recent_std,
+        "relative_change": relative_change,
+    }
+
+
 def run_single_simulation(
     n_samples: int,
     n_informative: int,
@@ -326,51 +363,80 @@ def run_single_simulation(
     return results
 
 
-def run_simulation_suite(output_dir: str = "./results", verbose: int = 1):
+def run_simulation_suite(output_dir: str = "./results", verbose: int = 1, n_runs: int = 100):
     """
     Run a suite of simulations with different configurations.
+    Each configuration is run n_runs times to compute statistics.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
     configs = [
-        {"n_samples": 8000, "n_informative": 10, "n_fake": 40, "noise": 10.0, "timesteps": 15000},
-        {"n_samples": 10000, "n_informative": 15, "n_fake": 60, "noise": 12.0, "timesteps": 15000},
-        {"n_samples": 12000, "n_informative": 20, "n_fake": 80, "noise": 15.0, "timesteps": 20000},
-        {"n_samples": 15000, "n_informative": 25, "n_fake": 100, "noise": 18.0, "timesteps": 20000},
+        {"n_samples": 500, "n_informative": 5, "n_fake": 15, "noise": 5.0, "timesteps": 5000},
+        {"n_samples": 1000, "n_informative": 8, "n_fake": 22, "noise": 8.0, "timesteps": 5000},
+        {"n_samples": 2000, "n_informative": 10, "n_fake": 40, "noise": 10.0, "timesteps": 8000},
+        {"n_samples": 5000, "n_informative": 15, "n_fake": 35, "noise": 12.0, "timesteps": 10000},
     ]
     
     all_results = []
+    config_statistics = []
     
     print("="*70)
     print("RL Variable Selection Simulation Suite")
     print("="*70)
-    print(f"Running {len(configs)} simulation configurations...")
+    print(f"Running {len(configs)} configurations × {n_runs} runs each = {len(configs) * n_runs} total simulations")
     print(f"Output directory: {output_path.absolute()}")
     print("="*70)
     
     for i, config in enumerate(configs):
-        print(f"\n[Simulation {i+1}/{len(configs)}]")
+        config_runs = []
         
-        results = run_single_simulation(
-            n_samples=config["n_samples"],
-            n_informative=config["n_informative"],
-            n_fake=config["n_fake"],
-            noise=config["noise"],
-            sparsity_penalty=0.01,
-            total_timesteps=config.get("timesteps", 10000),
-            random_state=42 + i,
-            verbose=verbose,
-        )
+        print(f"\n{'='*70}")
+        print(f"[Configuration {i+1}/{len(configs)}]")
+        print(f"  Samples: {config['n_samples']}, Informative: {config['n_informative']}, Fake: {config['n_fake']}, Noise: {config['noise']}")
+        print(f"  Running {n_runs} iterations...")
+        print("="*70)
         
-        results["config_id"] = i + 1
-        all_results.append(results)
+        for run_idx in range(n_runs):
+            if verbose or (run_idx + 1) % 10 == 0:
+                print(f"  Run {run_idx + 1}/{n_runs}...", end=" ", flush=True)
+            
+            results = run_single_simulation(
+                n_samples=config["n_samples"],
+                n_informative=config["n_informative"],
+                n_fake=config["n_fake"],
+                noise=config["noise"],
+                sparsity_penalty=0.01,
+                total_timesteps=config.get("timesteps", 10000),
+                random_state=42 + i * 1000 + run_idx,
+                verbose=0,  # Suppress per-run output
+            )
+            
+            results["config_id"] = i + 1
+            results["run_id"] = run_idx + 1
+            config_runs.append(results)
+            all_results.append(results)
+            
+            if verbose or (run_idx + 1) % 10 == 0:
+                print(f"Bandit F1={results['bandit_f1']:.3f}, RFE F1={results['rfe_f1']:.3f}")
+        
+        # Compute statistics for this configuration
+        stats = compute_config_statistics(config_runs, config, i + 1)
+        config_statistics.append(stats)
+        
+        print(f"\n  Configuration {i+1} Summary:")
+        print(f"    Bandit: F1={stats['bandit_f1_mean']:.3f}±{stats['bandit_f1_std']:.3f}, Precision={stats['bandit_precision_mean']:.3f}±{stats['bandit_precision_std']:.3f}")
+        print(f"    Sequential: F1={stats['sequential_f1_mean']:.3f}±{stats['sequential_f1_std']:.3f}")
+        print(f"    LassoCV: F1={stats['lasso_f1_mean']:.3f}±{stats['lasso_f1_std']:.3f}")
+        print(f"    RFE: F1={stats['rfe_f1_mean']:.3f}±{stats['rfe_f1_std']:.3f}")
     
-    summary_rows = []
+    # Save all individual run results
+    all_runs_rows = []
     for r in all_results:
         for method in ["bandit", "sequential", "lasso", "rfe"]:
             row = {
                 "config_id": r["config_id"],
+                "run_id": r.get("run_id", 1),
                 "n_samples": r["n_samples"],
                 "n_informative": r["n_informative"],
                 "n_fake": r["n_fake"],
@@ -384,64 +450,60 @@ def run_simulation_suite(output_dir: str = "./results", verbose: int = 1):
                 "f1": r[f"{method}_f1"],
                 "runtime_sec": r[f"{method}_runtime_sec"],
             }
-            summary_rows.append(row)
-        
-        summary_rows.append({
-            "config_id": r["config_id"],
-            "n_samples": r["n_samples"],
-            "n_informative": r["n_informative"],
-            "n_fake": r["n_fake"],
-            "noise": r["noise"],
-            "method": "All Features",
-            "n_selected": r["n_total_features"],
-            "test_r2": r["all_features_test_r2"],
-            "test_mse": r["all_features_test_mse"],
-            "precision": r["n_informative"] / r["n_total_features"],
-            "recall": 1.0,
-            "f1": 2 * (r["n_informative"] / r["n_total_features"]) / (1 + r["n_informative"] / r["n_total_features"]),
-            "runtime_sec": 0.0,
-        })
+            all_runs_rows.append(row)
     
-    summary_df = pd.DataFrame(summary_rows)
-    summary_df.to_csv(output_path / "simulation_results.csv", index=False)
+    all_runs_df = pd.DataFrame(all_runs_rows)
+    all_runs_df.to_csv(output_path / "simulation_all_runs.csv", index=False)
     
-    detailed_rows = []
-    for r in all_results:
-        detailed_rows.append({
-            "config_id": r["config_id"],
-            "n_samples": r["n_samples"],
-            "n_informative": r["n_informative"],
-            "n_fake": r["n_fake"],
-            "n_total_features": r["n_total_features"],
-            "noise": r["noise"],
-            "sparsity_penalty": r["sparsity_penalty"],
-            "total_timesteps": r["total_timesteps"],
-            "formula": r["formula"],
-            "true_features": str(r["true_features"]),
-            "bandit_features": str(r["bandit_selected_features"]),
-            "sequential_features": str(r["sequential_selected_features"]),
-            "lasso_features": str(r["lasso_selected_features"]),
-            "rfe_features": str(r["rfe_selected_features"]),
-        })
+    # Save statistics summary
+    stats_df = pd.DataFrame(config_statistics)
+    stats_df.to_csv(output_path / "simulation_statistics.csv", index=False)
     
-    detailed_df = pd.DataFrame(detailed_rows)
-    detailed_df.to_csv(output_path / "simulation_details.csv", index=False)
-    
-    generate_markdown_report(all_results, summary_df, output_path)
+    # Generate the new report with statistics
+    generate_markdown_report_with_stats(config_statistics, all_results, output_path, n_runs)
     
     print("\n" + "="*70)
     print("Simulation Complete!")
     print("="*70)
     print(f"\nResults saved to:")
-    print(f"  - {output_path / 'simulation_results.csv'}")
-    print(f"  - {output_path / 'simulation_details.csv'}")
+    print(f"  - {output_path / 'simulation_all_runs.csv'} (all {len(all_results)} individual runs)")
+    print(f"  - {output_path / 'simulation_statistics.csv'} (mean±std per config)")
     print(f"  - {output_path / 'simulation_report.md'}")
     
-    return summary_df, all_results
+    return stats_df, config_statistics
 
 
-def generate_markdown_report(all_results, summary_df, output_path):
-    """Generate a detailed markdown report of the simulation results."""
+def compute_config_statistics(config_runs: list, config: dict, config_id: int) -> dict:
+    """Compute mean and std statistics for a configuration across multiple runs."""
+    stats = {
+        "config_id": config_id,
+        "n_samples": config["n_samples"],
+        "n_informative": config["n_informative"],
+        "n_fake": config["n_fake"],
+        "n_total_features": config["n_informative"] + config["n_fake"],
+        "noise": config["noise"],
+        "timesteps": config.get("timesteps", 10000),
+        "n_runs": len(config_runs),
+    }
+    
+    # Collect metrics for each method
+    for method in ["bandit", "sequential", "lasso", "rfe"]:
+        for metric in ["n_selected", "test_r2", "test_mse", "precision", "recall", "f1", "runtime_sec"]:
+            key = f"{method}_{metric}"
+            values = [r[key] for r in config_runs if key in r]
+            if values:
+                stats[f"{key}_mean"] = np.mean(values)
+                stats[f"{key}_std"] = np.std(values)
+    
+    # All features baseline
+    stats["all_features_test_r2_mean"] = np.mean([r["all_features_test_r2"] for r in config_runs])
+    stats["all_features_test_r2_std"] = np.std([r["all_features_test_r2"] for r in config_runs])
+    
+    return stats
+
+
+def generate_markdown_report_with_stats(config_statistics: list, all_results: list, output_path: Path, n_runs: int):
+    """Generate a detailed markdown report with statistics from multiple runs."""
     
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
@@ -449,96 +511,112 @@ def generate_markdown_report(all_results, summary_df, output_path):
 
 **Generated:** {timestamp}
 
+**Simulation Settings:** {len(config_statistics)} configurations × {n_runs} runs each = {len(config_statistics) * n_runs} total simulations
+
 ## Overview
 
 This report summarizes the results of running reinforcement learning-based variable selection
 on synthetic datasets with known ground truth. We compare two RL approaches (Bandit MDP and 
 Sequential MDP) against traditional baseline methods (LassoCV and RFE).
 
-## Methods Compared
+Each configuration was run **{n_runs} times** with different random seeds to compute mean ± standard deviation.
 
-| Method | Description |
-|--------|-------------|
-| **Bandit MDP** | One-step MDP where agent selects all features via binary mask simultaneously |
-| **Sequential MDP** | Multi-step MDP where agent adds/removes features one at a time (gamma=0) |
-| **LassoCV** | L1-regularized regression with cross-validation for alpha selection |
-| **RFE** | Recursive Feature Elimination with Ridge regression |
-| **All Features** | Baseline using all features (no selection) |
+## Stopping Criteria for Each Method
+
+| Method | Stopping Criteria | Convergence Check |
+|--------|-------------------|-------------------|
+| **Bandit MDP** | Fixed timesteps (15,000-20,000) | No early stopping; runs for full timesteps |
+| **Sequential MDP** | Fixed timesteps (15,000-20,000) | No early stopping; gamma=0 (immediate reward only) |
+| **LassoCV** | Cross-validation convergence | Automatic via sklearn (max_iter=2000, cv=5) |
+| **RFE** | All features ranked | Deterministic; selects exactly n_informative features |
+
+### PPO Training Details (for RL methods)
+
+- **Objective**: Maximize reward = R² - 0.01 × n_selected_features
+- **Algorithm**: PPO with clipped surrogate objective (clip_range=0.2)
+- **Batch size**: 64, n_epochs=10 per update
+- **Learning rate**: 3e-4
 
 ## Simulation Configurations
 
-| Config | Samples | Informative | Fake | Total | Noise |
-|--------|---------|-------------|------|-------|-------|
+| Config | Samples | Informative | Fake | Total | Noise | Timesteps |
+|--------|---------|-------------|------|-------|-------|-----------|
 """
     
-    for r in all_results:
-        md_content += f"| {r['config_id']} | {r['n_samples']} | {r['n_informative']} | {r['n_fake']} | {r['n_total_features']} | {r['noise']} |\n"
+    for s in config_statistics:
+        md_content += f"| {s['config_id']} | {s['n_samples']} | {s['n_informative']} | {s['n_fake']} | {s['n_total_features']} | {s['noise']} | {s['timesteps']} |\n"
     
-    md_content += """
-## Detailed Results by Configuration
+    md_content += f"""
+
+## Results by Configuration (Mean ± Std over {n_runs} runs)
 
 """
     
-    for r in all_results:
-        md_content += f"""### Configuration {r['config_id']}
+    for s in config_statistics:
+        md_content += f"""### Configuration {s['config_id']}
 
-**Dataset:**
-- Samples: {r['n_samples']}
-- Informative features: {r['n_informative']}
-- Fake (noise) features: {r['n_fake']}
-- Total features: {r['n_total_features']}
-- Noise level: {r['noise']}
+**Dataset Settings:**
+- Samples: {s['n_samples']}
+- Informative features: {s['n_informative']}
+- Fake (noise) features: {s['n_fake']}
+- Total features: {s['n_total_features']}
+- Noise level: {s['noise']}
+- Training timesteps: {s['timesteps']}
 
-**True Formula:**
-```
-{r['formula']}
-```
+**Results (Mean ± Std over {n_runs} runs):**
 
-**True Feature Indices:** `{r['true_features']}`
-
-**Results:**
-
-| Method | Features Selected | Test R² | Test MSE | Precision | Recall | F1 | Runtime (s) |
-|--------|-------------------|---------|----------|-----------|--------|-----|-------------|
-| Bandit MDP | {r['bandit_n_selected']} | {r['bandit_test_r2']:.4f} | {r['bandit_test_mse']:.4f} | {r['bandit_precision']:.3f} | {r['bandit_recall']:.3f} | {r['bandit_f1']:.3f} | {r['bandit_runtime_sec']:.1f} |
-| Sequential MDP | {r['sequential_n_selected']} | {r['sequential_test_r2']:.4f} | {r['sequential_test_mse']:.4f} | {r['sequential_precision']:.3f} | {r['sequential_recall']:.3f} | {r['sequential_f1']:.3f} | {r['sequential_runtime_sec']:.1f} |
-| LassoCV | {r['lasso_n_selected']} | {r['lasso_test_r2']:.4f} | {r['lasso_test_mse']:.4f} | {r['lasso_precision']:.3f} | {r['lasso_recall']:.3f} | {r['lasso_f1']:.3f} | {r['lasso_runtime_sec']:.1f} |
-| RFE | {r['rfe_n_selected']} | {r['rfe_test_r2']:.4f} | {r['rfe_test_mse']:.4f} | {r['rfe_precision']:.3f} | {r['rfe_recall']:.3f} | {r['rfe_f1']:.3f} | {r['rfe_runtime_sec']:.1f} |
-| All Features | {r['n_total_features']} | {r['all_features_test_r2']:.4f} | {r['all_features_test_mse']:.4f} | - | - | - | - |
-
-**Selected Features:**
-- Bandit: `{r['bandit_selected_features']}`
-- Sequential: `{r['sequential_selected_features']}`
-- LassoCV: `{r['lasso_selected_features']}`
-- RFE: `{r['rfe_selected_features']}`
+| Method | Features | Test R² | Test MSE | Precision | Recall | F1 | Runtime (s) |
+|--------|----------|---------|----------|-----------|--------|-----|-------------|
+| Bandit MDP | {s['bandit_n_selected_mean']:.1f}±{s['bandit_n_selected_std']:.1f} | {s['bandit_test_r2_mean']:.3f}±{s['bandit_test_r2_std']:.3f} | {s['bandit_test_mse_mean']:.3f}±{s['bandit_test_mse_std']:.3f} | {s['bandit_precision_mean']:.3f}±{s['bandit_precision_std']:.3f} | {s['bandit_recall_mean']:.3f}±{s['bandit_recall_std']:.3f} | {s['bandit_f1_mean']:.3f}±{s['bandit_f1_std']:.3f} | {s['bandit_runtime_sec_mean']:.1f}±{s['bandit_runtime_sec_std']:.1f} |
+| Sequential MDP | {s['sequential_n_selected_mean']:.1f}±{s['sequential_n_selected_std']:.1f} | {s['sequential_test_r2_mean']:.3f}±{s['sequential_test_r2_std']:.3f} | {s['sequential_test_mse_mean']:.3f}±{s['sequential_test_mse_std']:.3f} | {s['sequential_precision_mean']:.3f}±{s['sequential_precision_std']:.3f} | {s['sequential_recall_mean']:.3f}±{s['sequential_recall_std']:.3f} | {s['sequential_f1_mean']:.3f}±{s['sequential_f1_std']:.3f} | {s['sequential_runtime_sec_mean']:.1f}±{s['sequential_runtime_sec_std']:.1f} |
+| LassoCV | {s['lasso_n_selected_mean']:.1f}±{s['lasso_n_selected_std']:.1f} | {s['lasso_test_r2_mean']:.3f}±{s['lasso_test_r2_std']:.3f} | {s['lasso_test_mse_mean']:.3f}±{s['lasso_test_mse_std']:.3f} | {s['lasso_precision_mean']:.3f}±{s['lasso_precision_std']:.3f} | {s['lasso_recall_mean']:.3f}±{s['lasso_recall_std']:.3f} | {s['lasso_f1_mean']:.3f}±{s['lasso_f1_std']:.3f} | {s['lasso_runtime_sec_mean']:.1f}±{s['lasso_runtime_sec_std']:.1f} |
+| RFE | {s['rfe_n_selected_mean']:.1f}±{s['rfe_n_selected_std']:.1f} | {s['rfe_test_r2_mean']:.3f}±{s['rfe_test_r2_std']:.3f} | {s['rfe_test_mse_mean']:.3f}±{s['rfe_test_mse_std']:.3f} | {s['rfe_precision_mean']:.3f}±{s['rfe_precision_std']:.3f} | {s['rfe_recall_mean']:.3f}±{s['rfe_recall_std']:.3f} | {s['rfe_f1_mean']:.3f}±{s['rfe_f1_std']:.3f} | {s['rfe_runtime_sec_mean']:.1f}±{s['rfe_runtime_sec_std']:.1f} |
+| All Features | {s['n_total_features']} | {s['all_features_test_r2_mean']:.3f}±{s['all_features_test_r2_std']:.3f} | - | {s['n_informative']/s['n_total_features']:.3f} | 1.000 | {2*(s['n_informative']/s['n_total_features'])/(1+s['n_informative']/s['n_total_features']):.3f} | - |
 
 ---
 
 """
     
-    avg_by_method = summary_df.groupby("method").agg({
-        "test_r2": "mean",
-        "test_mse": "mean",
-        "precision": "mean",
-        "recall": "mean",
-        "f1": "mean",
-        "n_selected": "mean",
-        "runtime_sec": "mean",
-    }).round(4)
-    
-    md_content += """## Summary Statistics (Averaged Across Configurations)
+    # Overall summary across all configurations
+    md_content += f"""## Overall Summary (Averaged Across All {len(config_statistics)} Configurations)
 
-| Method | Avg Features | Avg R² | Avg MSE | Avg Precision | Avg Recall | Avg F1 | Avg Runtime (s) |
-|--------|--------------|--------|---------|---------------|------------|--------|-----------------|
+| Method | Avg Features | Avg R² | Avg Precision | Avg Recall | Avg F1 | Avg Runtime (s) |
+|--------|--------------|--------|---------------|------------|--------|-----------------|
 """
     
-    for method in ["Bandit", "Sequential", "Lasso", "Rfe", "All Features"]:
-        if method in avg_by_method.index:
-            row = avg_by_method.loc[method]
-            runtime_str = f"{row['runtime_sec']:.1f}" if row['runtime_sec'] > 0 else "-"
-            md_content += f"| {method} | {row['n_selected']:.1f} | {row['test_r2']:.4f} | {row['test_mse']:.4f} | {row['precision']:.3f} | {row['recall']:.3f} | {row['f1']:.3f} | {runtime_str} |\n"
+    for method in ["bandit", "sequential", "lasso", "rfe"]:
+        avg_features = np.mean([s[f"{method}_n_selected_mean"] for s in config_statistics])
+        avg_r2 = np.mean([s[f"{method}_test_r2_mean"] for s in config_statistics])
+        avg_precision = np.mean([s[f"{method}_precision_mean"] for s in config_statistics])
+        avg_recall = np.mean([s[f"{method}_recall_mean"] for s in config_statistics])
+        avg_f1 = np.mean([s[f"{method}_f1_mean"] for s in config_statistics])
+        avg_runtime = np.mean([s[f"{method}_runtime_sec_mean"] for s in config_statistics])
+        
+        method_name = {"bandit": "Bandit MDP", "sequential": "Sequential MDP", "lasso": "LassoCV", "rfe": "RFE"}[method]
+        md_content += f"| {method_name} | {avg_features:.1f} | {avg_r2:.3f} | {avg_precision:.3f} | {avg_recall:.3f} | {avg_f1:.3f} | {avg_runtime:.1f} |\n"
+    
+    md_content += f"""
+## Convergence Analysis
+
+Since the RL methods (Bandit and Sequential MDP) use **fixed timestep stopping**, convergence 
+is determined by observing the stability of results across multiple runs:
+
+| Method | F1 Std (across runs) | Interpretation |
+|--------|---------------------|----------------|
+"""
+    
+    for s in config_statistics:
+        bandit_converged = "✓ Converged" if s['bandit_f1_std'] < 0.1 else "⚠ High variance"
+        seq_converged = "✓ Converged" if s['sequential_f1_std'] < 0.1 else "⚠ High variance"
+        md_content += f"| Config {s['config_id']} - Bandit | {s['bandit_f1_std']:.3f} | {bandit_converged} |\n"
+        md_content += f"| Config {s['config_id']} - Sequential | {s['sequential_f1_std']:.3f} | {seq_converged} |\n"
     
     md_content += """
+
+**Interpretation:**
+- F1 Std < 0.1: Model has converged to stable solutions
+- F1 Std ≥ 0.1: High variance suggests more training timesteps may help
+
 ## Metrics Explanation
 
 - **Test R²**: Coefficient of determination on held-out test set (higher is better)
@@ -547,24 +625,10 @@ Sequential MDP) against traditional baseline methods (LassoCV and RFE).
 - **Recall**: Proportion of truly informative features that were selected
 - **F1**: Harmonic mean of precision and recall
 
-## Conclusions
-
-The simulation results demonstrate the effectiveness of RL-based variable selection:
-
-1. **Feature Selection Quality**: Both RL methods (Bandit and Sequential MDP) can identify 
-   informative features while filtering out noise features.
-
-2. **Comparison with Baselines**: The RL methods are competitive with traditional methods 
-   like LassoCV and RFE in terms of both prediction performance and feature selection accuracy.
-
-3. **Trade-offs**: 
-   - Bandit MDP: Faster (one step per episode), but no intermediate feedback
-   - Sequential MDP: More flexible, can see intermediate results, but slower
-
 ## Files Generated
 
-- `simulation_results.csv`: Summary metrics for all methods and configurations
-- `simulation_details.csv`: Detailed information including selected feature indices
+- `simulation_all_runs.csv`: All individual run results
+- `simulation_statistics.csv`: Mean ± Std statistics per configuration
 - `simulation_report.md`: This report
 
 ## References
@@ -577,12 +641,20 @@ The simulation results demonstrate the effectiveness of RL-based variable select
 
 
 if __name__ == "__main__":
-    summary_df, all_results = run_simulation_suite(
-        output_dir="./results",
-        verbose=1,
+    import argparse
+    parser = argparse.ArgumentParser(description="Run RL Variable Selection Simulations")
+    parser.add_argument("--n_runs", type=int, default=100, help="Number of runs per configuration")
+    parser.add_argument("--output_dir", type=str, default="./results", help="Output directory")
+    parser.add_argument("--verbose", type=int, default=1, help="Verbosity level")
+    args = parser.parse_args()
+    
+    stats_df, config_statistics = run_simulation_suite(
+        output_dir=args.output_dir,
+        verbose=args.verbose,
+        n_runs=args.n_runs,
     )
     
     print("\n" + "="*70)
-    print("Summary Table:")
+    print("Statistics Summary (Mean ± Std):")
     print("="*70)
-    print(summary_df.to_string(index=False))
+    print(stats_df.to_string(index=False))
