@@ -107,9 +107,7 @@ def train_and_evaluate_bandit(
     # Select features
     selected_features = agent.select_features(deterministic=True)
     
-    results = evaluate_selection(
-        X_train, y_train, X_test, y_test, selected_features, task=task
-    )
+    results = evaluate_selection(X_test, y_test, selected_features, task=task)
     return selected_features, results, agent, env
 
 
@@ -161,9 +159,7 @@ def train_and_evaluate_sequential(
     selected_features = agent.select_features(deterministic=True)
     
     # Evaluate
-    results = evaluate_selection(
-        X_train, y_train, X_test, y_test, selected_features, task=task
-    )
+    results = evaluate_selection(X_test, y_test, selected_features, task=task)
     return selected_features, results, agent, env
 
 
@@ -279,9 +275,8 @@ def main():
     print(f"  Selected features: {len(bandit_features)}")
     if args.task == "regression":
         print(f"  Test R²: {bandit_results['test_r2']:.4f}, MSE: {bandit_results['test_mse']:.4f}")
-        print(f"  CV R²: {bandit_results['cv_r2_mean']:.4f} ± {bandit_results['cv_r2_std']:.4f}")
     else:
-        print(f"  Test accuracy: {bandit_results['test_accuracy']:.4f}, F1: {bandit_results['test_f1']:.4f}")
+        print(f"  Test F1: {bandit_results['test_f1']:.4f}")
         print(f"  CV accuracy: {bandit_results['cv_accuracy_mean']:.4f} ± {bandit_results['cv_accuracy_std']:.4f}")
     print(f"  Feature indices: {bandit_features.tolist()}")
     
@@ -299,9 +294,8 @@ def main():
     print(f"  Selected features: {len(seq_features)}")
     if args.task == "regression":
         print(f"  Test R²: {seq_results['test_r2']:.4f}, MSE: {seq_results['test_mse']:.4f}")
-        print(f"  CV R²: {seq_results['cv_r2_mean']:.4f} ± {seq_results['cv_r2_std']:.4f}")
     else:
-        print(f"  Test accuracy: {seq_results['test_accuracy']:.4f}, F1: {seq_results['test_f1']:.4f}")
+        print(f"  Test F1: {seq_results['test_f1']:.4f}")
         print(f"  CV accuracy: {seq_results['cv_accuracy_mean']:.4f} ± {seq_results['cv_accuracy_std']:.4f}")
     print(f"  Feature indices: {seq_features.tolist()}")
     
@@ -331,17 +325,12 @@ def main():
             "n_features": [len(bandit_features), len(seq_features)],
             "test_r2": [bandit_results["test_r2"], seq_results["test_r2"]],
             "test_mse": [bandit_results["test_mse"], seq_results["test_mse"]],
-            "cv_r2_mean": [bandit_results["cv_r2_mean"], seq_results["cv_r2_mean"]],
-            "cv_r2_std": [bandit_results["cv_r2_std"], seq_results["cv_r2_std"]],
         })
     else:
         comparison_summary = pd.DataFrame({
             "Method": ["Bandit (One-step)", "Sequential MDP (Multi-step)"],
             "n_features": [len(bandit_features), len(seq_features)],
-            "test_accuracy": [bandit_results["test_accuracy"], seq_results["test_accuracy"]],
             "test_f1": [bandit_results["test_f1"], seq_results["test_f1"]],
-            "cv_accuracy_mean": [bandit_results["cv_accuracy_mean"], seq_results["cv_accuracy_mean"]],
-            "cv_accuracy_std": [bandit_results["cv_accuracy_std"], seq_results["cv_accuracy_std"]],
         })
     print(comparison_summary.to_string(index=False))
     

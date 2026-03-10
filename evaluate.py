@@ -9,142 +9,136 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Dict, Any, Optional, Tuple
-from sklearn.linear_model import LassoCV, Lasso, Ridge, LogisticRegression, LogisticRegressionCV
-from sklearn.feature_selection import RFE, SequentialFeatureSelector
-from sklearn.metrics import (
-    mean_squared_error,
-    r2_score,
-    mean_absolute_error,
-    accuracy_score,
-    f1_score,
+from sklearn.linear_model import (
+    LinearRegression,
+    LassoCV,
+    Lasso,
+    LogisticRegression,
+    LogisticRegressionCV,
 )
-from sklearn.model_selection import cross_val_score
-
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.metrics import mean_squared_error, r2_score, f1_score, roc_auc_score
+from reward_utils import (
+    g_prior,
+    log_bayes_factor_regression,
+    cv_rmse,
+    cv_auc,
+    reward_regression_bayes_factor,
+)
 
 def evaluate_selection(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
+    X: np.ndarray,
+    y: np.ndarray,
     selected_features: np.ndarray,
     task: str = "regression",
     model=None,
-    cv: int = 5,
+    random_state: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Evaluate selected features on test set.
-    
+    Evaluate selected features on the given data (e.g. test set).
+    Uses OLS for regression and LogisticRegression(penalty='none') for classification.
+    Null model (no features) is valid: intercept-only; metrics computed correctly.
+
     Args:
-        X_train, y_train: Training data
-        X_test, y_test: Test data
+        X, y: Data to fit and evaluate on (e.g. test set)
         selected_features: Indices of selected features
         task: 'regression' or 'classification'
-        model: sklearn estimator (default: Ridge for regression, LogisticRegression for classification)
-        cv: Number of CV folds for cross-validation score
-        
+        model: sklearn estimator (default: LinearRegression / LogisticRegression(penalty='none'))
+        random_state: Random seed for reproducible fits (classification default model).
+
     Returns:
-        Dictionary with evaluation metrics (test_r2/test_mse for regression,
-        test_accuracy/test_f1 for classification, plus n_features, selected_features).
+        Dict with task, n_features, selected_features; regression: test_mse, test_r2;
+        classification: test_f1, test_auc.
     """
     if model is None:
-        model = Ridge(alpha=1.0) if task == "regression" else LogisticRegression(max_iter=1000, random_state=42)
-    
+        model = (
+            LinearRegression()
+            if task == "regression"
+            else LogisticRegression(penalty="none", max_iter=1000, random_state=random_state)
+        )
+
     if len(selected_features) == 0:
+        # Null model: intercept only
         if task == "regression":
+            y_pred_null = np.full_like(y, np.mean(y), dtype=np.float64)
             return {
                 "task": task,
                 "n_features": 0,
-                "test_mse": np.inf,
-                "test_r2": -np.inf,
-                "test_mae": np.inf,
-                "cv_r2_mean": -np.inf,
-                "cv_r2_std": 0.0,
+                "test_mse": float(mean_squared_error(y, y_pred_null)),
+                "test_r2": 0.0,
                 "selected_features": [],
             }
         else:
+            # Classification null: predict with p = mean(y)
+            y_bin = (y == np.unique(y)[1]).astype(np.int32)
+            p_mean = np.mean(y_bin)
+            y_pred_null = (np.full(len(y), p_mean) >= 0.5).astype(np.int32)
             return {
                 "task": task,
                 "n_features": 0,
-                "test_accuracy": 0.0,
-                "test_f1": 0.0,
-                "cv_accuracy_mean": 0.0,
-                "cv_accuracy_std": 0.0,
+                "test_f1": float(f1_score(y_bin, y_pred_null, average="weighted", zero_division=0)),
+                "test_auc": 0.5,
                 "selected_features": [],
             }
-    
-    X_train_selected = X_train[:, selected_features]
-    X_test_selected = X_test[:, selected_features]
-    model.fit(X_train_selected, y_train)
-    y_pred = model.predict(X_test_selected)
-    
+
+    X_sel = X[:, selected_features]
+    model.fit(X_sel, y)
+    y_pred = model.predict(X_sel)
+
     if task == "regression":
-        cv_scores = cross_val_score(model, X_train_selected, y_train, cv=cv, scoring="r2")
         return {
             "task": task,
             "n_features": len(selected_features),
-            "test_mse": mean_squared_error(y_test, y_pred),
-            "test_r2": r2_score(y_test, y_pred),
-            "test_mae": mean_absolute_error(y_test, y_pred),
-            "cv_r2_mean": cv_scores.mean(),
-            "cv_r2_std": cv_scores.std(),
+            "test_mse": float(mean_squared_error(y, y_pred)),
+            "test_r2": float(r2_score(y, y_pred)),
             "selected_features": selected_features.tolist(),
         }
     else:
-        cv_scores = cross_val_score(model, X_train_selected, y_train, cv=cv, scoring="accuracy")
+        proba = model.predict_proba(X_sel)
+        auc = float(roc_auc_score(y, proba[:, 1]))
         return {
             "task": task,
             "n_features": len(selected_features),
-            "test_accuracy": accuracy_score(y_test, y_pred),
-            "test_f1": f1_score(y_test, y_pred, average="weighted", zero_division=0),
-            "cv_accuracy_mean": cv_scores.mean(),
-            "cv_accuracy_std": cv_scores.std(),
+            "test_f1": float(f1_score(y, y_pred, average="weighted", zero_division=0)),
+            "test_auc": auc,
             "selected_features": selected_features.tolist(),
         }
-
-
-def _log_bayes_factor_regression(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    selected: np.ndarray,
-    g_prior: float,
-) -> float:
-    """Log Bayes factor vs null (intercept-only) under g-prior. Used for MCMC baseline."""
-    n, p_total = X_train.shape[0], X_train.shape[1]
-    if len(selected) == 0:
-        return 0.0
-    X_sel = X_train[:, selected]
-    model = Ridge(alpha=1e-10)
-    model.fit(X_sel, y_train)
-    y_pred = model.predict(X_sel)
-    r2 = r2_score(y_train, y_pred)
-    r2_safe = np.clip(r2, 1e-10, 1 - 1e-10)
-    p_g = len(selected)
-    bf = (1 + g_prior) ** ((n - p_g - 1) / 2) * (
-        1 + g_prior * (1 - r2_safe)
-    ) ** (-(n - 1) / 2)
-    return np.log(max(bf, 1e-300))
 
 
 def _mcmc_metropolis_variable_selection(
     X_train: np.ndarray,
     y_train: np.ndarray,
-    n_iter: int = 500,
+    n_iter: int = 1000,
     random_state: Optional[int] = None,
 ) -> np.ndarray:
     """
     Metropolis algorithm for Bayesian variable selection (g-prior).
     Propose by flipping one coordinate or swapping two; accept with min(1, BF_new/BF_old).
+    Starts from a random subset (random start). Uses a cache for visited models' log BF.
     Returns selected feature indices (gamma where gamma_j=1).
     """
     rng = np.random.default_rng(random_state)
     n, p = X_train.shape
-    g_prior = max(p ** 2, n)
+    g = g_prior(n, p)
+    cache: Dict[Tuple[int, ...], float] = {}
+
+    def get_log_bf(selected_indices: np.ndarray) -> float:
+        key = tuple(sorted(selected_indices.tolist()))
+        if key not in cache:
+            cache[key] = reward_regression_bayes_factor(
+                X_train, y_train, np.asarray(key), g=g
+            )
+        return cache[key]
+
+    # Random start: random subset of size 0 to min(p, 20)
+    n_start = int(rng.integers(0, min(p + 1, 21)))
+    start_indices = rng.choice(p, size=n_start, replace=False) if n_start > 0 else np.array([], dtype=np.intp)
     gamma = np.zeros(p, dtype=np.int8)
-    log_bf = _log_bayes_factor_regression(
-        X_train, y_train, np.where(gamma)[0], g_prior
-    )
+    gamma[start_indices] = 1
+    log_bf = get_log_bf(np.where(gamma)[0])
     best_gamma = gamma.copy()
     best_log_bf = log_bf
+
     for _ in range(n_iter):
         if rng.random() < 0.5:
             # Flip one coordinate
@@ -152,12 +146,21 @@ def _mcmc_metropolis_variable_selection(
             gamma_new = gamma.copy()
             gamma_new[j] = 1 - gamma_new[j]
         else:
-            # Swap two coordinates
-            idx = rng.choice(p, size=2, replace=False)
-            gamma_new = gamma.copy()
-            gamma_new[idx[0]], gamma_new[idx[1]] = gamma_new[idx[1]], gamma_new[idx[0]]
+            # Swap two coordinates (must differ: one in, one out)
+            in_set = np.where(gamma == 1)[0]
+            out_set = np.where(gamma == 0)[0]
+            if len(in_set) > 0 and len(out_set) > 0:
+                i_in = rng.choice(in_set)
+                i_out = rng.choice(out_set)
+                gamma_new = gamma.copy()
+                gamma_new[i_in], gamma_new[i_out] = 0, 1
+            else:
+                # No valid swap (all 0 or all 1); flip one instead
+                j = rng.integers(0, p)
+                gamma_new = gamma.copy()
+                gamma_new[j] = 1 - gamma_new[j]
         sel_new = np.where(gamma_new)[0]
-        log_bf_new = _log_bayes_factor_regression(X_train, y_train, sel_new, g_prior)
+        log_bf_new = get_log_bf(sel_new)
         if np.log(rng.random()) < log_bf_new - log_bf:
             gamma = gamma_new
             log_bf = log_bf_new
@@ -167,6 +170,214 @@ def _mcmc_metropolis_variable_selection(
     return np.where(best_gamma)[0]
 
 
+def _lasso_by_criterion(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    task: str,
+    criterion: str,
+    cv: int,
+    alphas: Optional[np.ndarray] = None,
+    adaptive: bool = False,
+    random_state: Optional[int] = None,
+) -> np.ndarray:
+    """Lasso (or Adaptive Lasso if adaptive=True) by criterion: cv, aic, bic, or bayes_factor. Returns selected indices.
+    Adaptive: regression uses OLS MLE for weights; classification uses LogisticRegression(penalty='none') MLE.
+    Selection uses coefficient in weighted space (delta) so large w do not amplify noise and cause over-selection."""
+    from reward_utils import (
+        g_prior,
+        log_likelihood_regression,
+        log_bayes_factor_regression,
+        log_likelihood_binary_classification,
+        aic,
+        bic,
+    )
+
+    n, p = X_train.shape
+    # Optional adaptive weights (regression: OLS; classification: LogisticRegression MLE)
+    X_fit = X_train
+    w = np.ones(p)
+    if adaptive:
+        if task == "regression":
+            ols_init = LinearRegression().fit(X_train, y_train)
+            w = 1 / np.maximum(np.abs(ols_init.coef_), 1e-5)
+        else:
+            logreg_mle = LogisticRegression(penalty="none", max_iter=1000, random_state=random_state).fit(X_train, y_train)
+            w = 1 / np.maximum(np.abs(logreg_mle.coef_.ravel()), 1e-5)
+        X_fit = X_train * w
+
+    # Classification
+    if task != "regression":
+        use_cv = criterion in ("cv", "bayes_factor")
+        if use_cv:
+            logreg_cv = LogisticRegressionCV(
+                cv=cv, random_state=random_state, max_iter=1000, penalty="l1", solver="saga"
+            )
+            logreg_cv.fit(X_fit, y_train)
+            # For adaptive: threshold in weighted space (delta) to avoid over-selection from large w
+            coef_sel = logreg_cv.coef_.ravel() if adaptive else logreg_cv.coef_.ravel()
+            return np.where(np.abs(coef_sel) > 1e-6)[0]
+        y_bin = (y_train == np.unique(y_train)[1]).astype(np.float64)
+        alphas = alphas if alphas is not None else np.logspace(-4, 4, 50)
+        best_score, best_support = -np.inf, np.array([], dtype=int)
+        for alpha in alphas:
+            C = 1.0 / max(alpha, 1e-10)
+            logreg_l1 = LogisticRegression(penalty="l1", solver="saga", C=C, max_iter=1000, random_state=random_state)
+            logreg_l1.fit(X_fit, y_train)
+            coef_sel = logreg_l1.coef_.ravel() if adaptive else logreg_l1.coef_.ravel()
+            support = np.where(np.abs(coef_sel) > 1e-6)[0]
+            if len(support) == 0:
+                log_lik = log_likelihood_binary_classification(y_bin, np.full_like(y_bin, np.mean(y_bin)))
+                score = -aic(log_lik, 0) if criterion == "aic" else -bic(log_lik, 0, n)
+            else:
+                logreg_ols = LogisticRegression(penalty="none", max_iter=1000, random_state=random_state)
+                logreg_ols.fit(X_train[:, support], y_train)
+                p = logreg_ols.predict_proba(X_train[:, support])[:, 1]
+                log_lik = log_likelihood_binary_classification(y_bin, p)
+                score = -aic(log_lik, len(support)) if criterion == "aic" else -bic(log_lik, len(support), n)
+            if score > best_score:
+                best_score, best_support = score, support
+        return best_support
+
+    # Regression
+
+    # Regression: CV
+    if criterion == "cv":
+        lasso = LassoCV(cv=cv, random_state=random_state, max_iter=2000)
+        lasso.fit(X_fit, y_train)
+        coef_sel = lasso.coef_ if adaptive else lasso.coef_
+        return np.where(np.abs(coef_sel) > 1e-6)[0]
+
+    # Regression: AIC / BIC / bayes_factor (reward form: -AIC, -BIC, log BF; maximize)
+    alphas = alphas if alphas is not None else np.logspace(-4, 4, 50)
+    g_val = g_prior(n, p)
+    best_score = -np.inf
+    best_support = np.array([], dtype=int)
+    for alpha in alphas:
+        lasso = Lasso(alpha=alpha, max_iter=2000, random_state=random_state)
+        lasso.fit(X_fit, y_train)
+        coef_sel = lasso.coef_ if adaptive else lasso.coef_
+        support = np.where(np.abs(coef_sel) > 1e-6)[0]
+        if len(support) == 0:
+            rss_null = np.sum((y_train - np.mean(y_train)) ** 2)
+            log_lik_null = log_likelihood_regression(rss_null, n)
+            score = 0.0 if criterion == "bayes_factor" else (-aic(log_lik_null, 0) if criterion == "aic" else -bic(log_lik_null, 0, n))
+        else:
+            ols = LinearRegression()
+            ols.fit(X_train[:, support], y_train)
+            y_pred = ols.predict(X_train[:, support])
+            rss = np.sum((y_train - y_pred) ** 2)
+            r2 = r2_score(y_train, y_pred)
+            log_lik = log_likelihood_regression(rss, n)
+            p_g = len(support)
+            score = log_bayes_factor_regression(r2, n, p_g, g_val) if criterion == "bayes_factor" else (-aic(log_lik, p_g) if criterion == "aic" else -bic(log_lik, p_g, n))
+        if score > best_score:
+            best_score, best_support = score, support
+    return best_support
+
+
+def _forward_backward_selection_by_criterion(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    task: str,
+    criterion: str,
+    cv: int,
+    direction: str = "forward",
+    random_state: Optional[int] = None,
+) -> np.ndarray:
+    """Forward or backward selection by criterion. Stops when criterion would decrease.
+    direction: 'forward' (add features from empty) or 'backward' (remove features from full)."""
+    from sklearn.model_selection import cross_val_score, KFold
+    from reward_utils import (
+        g_prior,
+        log_likelihood_regression,
+        log_bayes_factor_regression,
+        reward_classification_aic,
+        reward_classification_bic,
+        aic,
+        bic,
+    )
+
+    n, p = X_train.shape
+    g_val = g_prior(n, p) if criterion == "bayes_factor" else None
+    cv_splitter = KFold(n_splits=cv, shuffle=True, random_state=random_state) if random_state is not None else cv
+
+    def _score(indices):
+        if len(indices) == 0:
+            if task == "regression":
+                rss = np.sum((y_train - np.mean(y_train)) ** 2)
+                log_lik = log_likelihood_regression(rss, n)
+                if criterion == "aic":
+                    return -aic(log_lik, 0)
+                if criterion == "bic":
+                    return -bic(log_lik, 0, n)
+                return 0.0
+            if task == "classification":
+                if criterion == "aic":
+                    return reward_classification_aic(X_train, y_train, np.array([], dtype=int), random_state=random_state)
+                if criterion == "bic":
+                    return reward_classification_bic(X_train, y_train, np.array([], dtype=int), random_state=random_state)
+                return 0.5
+        X_sel = X_train[:, indices]
+        if task == "regression":
+            ols = LinearRegression().fit(X_sel, y_train)
+            y_pred = ols.predict(X_sel)
+            rss = np.sum((y_train - y_pred) ** 2)
+            r2 = r2_score(y_train, y_pred)
+            log_lik = log_likelihood_regression(rss, n)
+            p_g = len(indices)
+            if criterion == "cv":
+                return cross_val_score(ols, X_sel, y_train, cv=cv_splitter, scoring="r2").mean()
+            if criterion == "aic":
+                return -aic(log_lik, p_g)
+            if criterion == "bic":
+                return -bic(log_lik, p_g, n)
+            return log_bayes_factor_regression(r2, n, p_g, g_val)
+        if criterion == "cv":
+            lr = LogisticRegression(penalty="none", max_iter=1000, random_state=random_state)
+            return cross_val_score(lr, X_sel, y_train, cv=cv_splitter, scoring="roc_auc").mean()
+        if criterion == "aic":
+            return reward_classification_aic(X_train, y_train, np.asarray(indices), random_state=random_state)
+        return reward_classification_bic(X_train, y_train, np.asarray(indices), random_state=random_state)
+
+    if direction == "forward":
+        selected = []
+        current_score = _score(selected)
+        for _ in range(p):
+            best_j = -1
+            best_score = -np.inf
+            for j in range(p):
+                if j in selected:
+                    continue
+                try_set = selected + [j]
+                score = _score(try_set)
+                if score > best_score:
+                    best_score = score
+                    best_j = j
+            if best_j < 0 or best_score <= current_score:
+                break
+            selected.append(best_j)
+            current_score = best_score
+        return np.array(selected)
+
+    # backward
+    current = list(range(p))
+    current_score = _score(current)
+    while len(current) > 1:
+        best_drop = -1
+        best_score_after = -np.inf
+        for idx in range(len(current)):
+            try_set = [current[i] for i in range(len(current)) if i != idx]
+            score = _score(try_set)
+            if score > best_score_after:
+                best_score_after = score
+                best_drop = idx
+        if best_drop < 0 or best_score_after < current_score:
+            break
+        current = [current[i] for i in range(len(current)) if i != best_drop]
+        current_score = best_score_after
+    return np.array(current)
+
+
 def compare_with_baselines(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -174,136 +385,94 @@ def compare_with_baselines(
     y_test: np.ndarray,
     selected_features: np.ndarray,
     task: str = "regression",
-    n_features_target: Optional[int] = None,
     cv: int = 5,
+    selection_criterion: str = "cv",
+    random_state: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Compare RL-selected features with baseline methods.
-    Regression: RL, LassoCV, Adaptive Lasso, Forward Selection, RFE, MCMC (Metropolis), All.
-    Classification: RL, LogisticRegressionCV, Forward, RFE, All.
+    selection_criterion: 'cv' (default), 'aic', 'bic', or 'bayes_factor'. Controls how
+    Lasso/Adaptive Lasso/Forward/RFE choose their hyperparameters or feature order.
+    Forward and RFE stop when the criterion would decrease.
+    Regression: RL, Lasso, Adaptive Lasso, Forward, RFE, MCMC (Metropolis), All.
+    Classification: RL, LogisticRegressionCV, Adaptive Lasso, Forward, RFE, All.
     """
     results = []
-    if n_features_target is None:
-        n_features_target = len(selected_features)
-    
-    estimator = Ridge(alpha=1.0) if task == "regression" else LogisticRegression(max_iter=1000, random_state=42)
-    
+
+    estimator = (
+        LinearRegression()
+        if task == "regression"
+        else LogisticRegression(penalty="none", max_iter=1000, random_state=random_state)
+    )
+
     def _row(name: str, res: Dict[str, Any]) -> Dict[str, Any]:
         row = {"method": name, "n_features": res["n_features"]}
         if task == "regression":
             row["test_r2"] = res.get("test_r2")
             row["test_mse"] = res.get("test_mse")
-            row["cv_r2_mean"] = res.get("cv_r2_mean")
-            row["cv_r2_std"] = res.get("cv_r2_std")
         else:
-            row["test_accuracy"] = res.get("test_accuracy")
             row["test_f1"] = res.get("test_f1")
-            row["cv_accuracy_mean"] = res.get("cv_accuracy_mean")
-            row["cv_accuracy_std"] = res.get("cv_accuracy_std")
+            row["test_auc"] = res.get("test_auc")
         return row
-    
+
     # 1. RL
-    rl_results = evaluate_selection(
-        X_train, y_train, X_test, y_test, selected_features, task=task, cv=cv
-    )
+    rl_results = evaluate_selection(X_test, y_test, selected_features, task=task, random_state=random_state)
     results.append(_row("RL (PPO)", rl_results))
+
+    # 2. Lasso (regression) or LogisticRegressionCV (classification)
+    lasso_features = _lasso_by_criterion(X_train, y_train, task, selection_criterion, cv, random_state=random_state)
+    lr_results = evaluate_selection(X_test, y_test, lasso_features, task=task, random_state=random_state)
+    label = "LassoCV" if selection_criterion == "cv" else f"Lasso ({selection_criterion})"
     
-    # 2. LassoCV (regression) or LogisticRegressionCV (classification)
-    if task == "regression":
-        lasso = LassoCV(cv=cv, random_state=42, max_iter=2000)
-        lasso.fit(X_train, y_train)
-        lasso_features = np.where(np.abs(lasso.coef_) > 1e-6)[0]
-        if len(lasso_features) > 0:
-            lr_results = evaluate_selection(
-                X_train, y_train, X_test, y_test, lasso_features, task=task, cv=cv
-            )
-            results.append(_row("LassoCV", lr_results))
-        # 2b. Adaptive Lasso: weights w_j = 1/|beta_hat_j| from OLS/Ridge
-        try:
-            ridge_init = Ridge(alpha=1e-5, random_state=42).fit(X_train, y_train)
-            beta_hat = ridge_init.coef_
-            w = 1 / np.maximum(np.abs(beta_hat), 1e-5)
-            X_adaptive = X_train * w
-            adlasso = LassoCV(cv=cv, random_state=42, max_iter=2000)
-            adlasso.fit(X_adaptive, y_train)
-            adlasso_coef = adlasso.coef_ * w  # map back to original scale for support
-            adlasso_features = np.where(np.abs(adlasso_coef) > 1e-6)[0]
-            if len(adlasso_features) > 0:
-                adlasso_results = evaluate_selection(
-                    X_train, y_train, X_test, y_test, adlasso_features, task=task, cv=cv
-                )
-                results.append(_row("Adaptive Lasso", adlasso_results))
-        except Exception as e:
-            print(f"Adaptive Lasso failed: {e}")
-    else:
-        logreg_cv = LogisticRegressionCV(cv=cv, random_state=42, max_iter=1000)
-        logreg_cv.fit(X_train, y_train)
-        # Use non-zero coefs as "selected" (for multinomial we use any non-zero)
-        if hasattr(logreg_cv, "coef_") and logreg_cv.coef_.ndim == 2:
-            selected = np.unique(np.where(np.abs(logreg_cv.coef_) > 1e-6)[1])
-        else:
-            selected = np.where(np.abs(logreg_cv.coef_.ravel()) > 1e-6)[0]
-        if len(selected) > 0:
-            lr_results = evaluate_selection(
-                X_train, y_train, X_test, y_test, selected, task=task, cv=cv
-            )
-            results.append(_row("LogisticRegressionCV", lr_results))
-    
+    results.append(_row(label, lr_results))
+
+    # 2b. Adaptive Lasso (weights: OLS MLE for regression, LogisticRegression MLE for classification)
+    try:
+        adlasso_features = _lasso_by_criterion(
+            X_train, y_train, task, selection_criterion, cv, adaptive=True, random_state=random_state
+        )
+        adlasso_results = evaluate_selection(X_test, y_test, adlasso_features, task=task, random_state=random_state)
+        label = "Adaptive Lasso (CV)" if selection_criterion == "cv" else f"Adaptive Lasso ({selection_criterion})"
+        results.append(_row(label, adlasso_results))
+    except Exception as e:
+        print(f"Adaptive Lasso failed: {e}")
+
     # 3. Forward Selection
-    if n_features_target > 0 and n_features_target <= X_train.shape[1]:
-        try:
-            forward_selector = SequentialFeatureSelector(
-                estimator,
-                n_features_to_select=n_features_target,
-                direction="forward",
-                cv=cv,
-                n_jobs=-1,
-            )
-            forward_selector.fit(X_train, y_train)
-            forward_features = np.where(forward_selector.get_support())[0]
-            if len(forward_features) > 0:
-                fr_results = evaluate_selection(
-                    X_train, y_train, X_test, y_test, forward_features, task=task, cv=cv
-                )
-                results.append(_row("Forward Selection", fr_results))
-        except Exception as e:
-            print(f"Forward selection failed: {e}")
-    
-    # 4. RFE
-    if n_features_target > 0 and n_features_target <= X_train.shape[1]:
-        try:
-            rfe = RFE(estimator, n_features_to_select=n_features_target)
-            rfe.fit(X_train, y_train)
-            rfe_features = np.where(rfe.get_support())[0]
-            if len(rfe_features) > 0:
-                rfe_results = evaluate_selection(
-                    X_train, y_train, X_test, y_test, rfe_features, task=task, cv=cv
-                )
-                results.append(_row("RFE", rfe_results))
-        except Exception as e:
-            print(f"RFE failed: {e}")
-    
-    # 5. MCMC (Metropolis) for regression only
+    try:
+        forward_features = _forward_backward_selection_by_criterion(
+            X_train, y_train, task, selection_criterion, cv, direction="forward", random_state=random_state
+        )
+        fr_results = evaluate_selection(X_test, y_test, forward_features, task=task, random_state=random_state)
+        results.append(_row("Forward Selection", fr_results))
+    except Exception as e:
+        print(f"Forward selection failed: {e}")
+
+    # 4. Backward selection
+    try:
+        backward_features = _forward_backward_selection_by_criterion(
+            X_train, y_train, task, selection_criterion, cv, direction="backward", random_state=random_state
+        )
+        backward_results = evaluate_selection(X_test, y_test, backward_features, task=task, random_state=random_state)
+        results.append(_row("Backward Selection", backward_results))
+    except Exception as e:
+        print(f"Backward selection failed: {e}")
+
+    # 5. MCMC (regression only)
     if task == "regression":
         try:
             mcmc_features = _mcmc_metropolis_variable_selection(
-                X_train, y_train, n_iter=500, random_state=42
+                X_train, y_train, random_state=random_state
             )
-            if len(mcmc_features) > 0:
-                mcmc_results = evaluate_selection(
-                    X_train, y_train, X_test, y_test, mcmc_features, task=task, cv=cv
-                )
-                results.append(_row("MCMC (Metropolis)", mcmc_results))
+            mcmc_results = evaluate_selection(X_test, y_test, mcmc_features, task=task, random_state=random_state)
+            results.append(_row("MCMC (Metropolis)", mcmc_results))
         except Exception as e:
             print(f"MCMC failed: {e}")
-    
+
     # 6. All features
     all_features = np.arange(X_train.shape[1])
-    all_results = evaluate_selection(
-        X_train, y_train, X_test, y_test, all_features, task=task, cv=cv
-    )
+    all_results = evaluate_selection(X_test, y_test, all_features, task=task, random_state=random_state)
     results.append(_row("All Features", all_results))
-    
+
     return pd.DataFrame(results)
 
 

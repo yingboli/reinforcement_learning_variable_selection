@@ -27,9 +27,9 @@ Use e.g. `--reward_type cv_rmse`, `aic`, `bic`, or `bayes_factor` in regression.
 | Component | Status | Where |
 |-----------|--------|--------|
 | Bandit (one-step, policy = NN) | Done | `env_bandit.py`, `agent_bandit.py` |
-| MDP (multi-step, toggle + stop) | Done | `env_sequential.py`, `agent_sequential.py` |
+| MDP (multi-step, toggle) | Done | `env_sequential.py`, `agent_sequential.py` |
 | PPO with clipped objective | Done | stable-baselines3 PPO in `agent_base.py` |
-| Discount γ=0 (or configurable) | Done | Sequential agent uses gamma=0 by default; can set >0 for trajectory credit |
+
 
 ## 4. Simulation studies (Section 4.1)
 

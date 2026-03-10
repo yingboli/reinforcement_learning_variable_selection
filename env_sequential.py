@@ -67,6 +67,11 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
       info["action_mask"] gives valid actions (True = valid) for use with
       maskable policies.
     - action_type "toggle": actions 0..n_features-1 = toggle feature j.
+    
+    Optional: random_start_probability (0–1) starts some episodes from a random
+    non-empty selection to avoid under-selection. improvement_bonus_coef adds
+    a bonus proportional to (reward_after - reward_before) to emphasize
+    improvement over the previous step.
     """
     
     def __init__(
@@ -79,6 +84,8 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         max_episode_steps: Optional[int] = None,
         action_type: str = "toggle",
         invalid_action_penalty: float = 0.01,
+        random_start_probability: float = 0.0,
+        improvement_bonus_coef: float = 0.0,
         random_state: Optional[int] = None,
     ):
         super().__init__(
@@ -98,8 +105,11 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         self.max_episode_steps = max_episode_steps
         self.action_type = action_type
         self.invalid_action_penalty = invalid_action_penalty
+        self.random_start_probability = float(random_start_probability)
+        self.improvement_bonus_coef = float(improvement_bonus_coef)
         self.state = np.zeros(self.n_features, dtype=np.int8)
         self.current_step = 0
+        self._last_reward: Optional[float] = None
         
         n_actions = self.n_features if action_type == "toggle" else 2 * self.n_features
         self.action_space = spaces.Discrete(n_actions)
@@ -135,12 +145,21 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         self.state = np.zeros(self.n_features, dtype=np.int8)
         self.current_step = 0
         
-        if options is not None and options.get("random_start", False):
-            n_random = self.np_random.integers(1, min(self.n_features // 2, 10))
+        # Explicit options["random_start"] overrides; else use random_start_probability for training
+        opt = options or {}
+        if "random_start" in opt:
+            use_random = bool(opt["random_start"])
+        else:
+            use_random = self.random_start_probability > 0 and self.np_random.random() < self.random_start_probability
+        if use_random:
+            n_random = self.np_random.integers(1, min(max(1, self.n_features // 2), 10))
             random_indices = self.np_random.choice(
                 self.n_features, size=n_random, replace=False
             )
             self.state[random_indices] = 1
+        
+        selected_indices = np.where(self.state == 1)[0]
+        self._last_reward = self._compute_reward(selected_indices)
         
         obs = self._get_observation()
         info = {
@@ -171,7 +190,11 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         
         self.current_step += 1
         selected_indices = np.where(self.state == 1)[0]
-        reward = self._compute_reward(selected_indices)
+        reward_after = self._compute_reward(selected_indices)
+        reward = reward_after
+        if self.improvement_bonus_coef != 0 and self._last_reward is not None:
+            reward += self.improvement_bonus_coef * (reward_after - self._last_reward)
+        self._last_reward = reward_after
         if invalid:
             reward = reward - self.invalid_action_penalty
         terminated = self.current_step >= self.max_episode_steps

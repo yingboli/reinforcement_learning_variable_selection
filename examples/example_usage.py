@@ -83,12 +83,9 @@ def main():
     
     # Evaluate selection
     print("\nEvaluating selection...")
-    results = evaluate_selection(
-        X_train, y_train, X_test, y_test, selected_features
-    )
+    results = evaluate_selection(X_test, y_test, selected_features)
     print(f"Test R²: {results['test_r2']:.4f}")
     print(f"Test MSE: {results['test_mse']:.4f}")
-    print(f"CV R² (mean ± std): {results['cv_r2_mean']:.4f} ± {results['cv_r2_std']:.4f}")
     
     # Compare with baselines
     print("\nComparing with baseline methods...")

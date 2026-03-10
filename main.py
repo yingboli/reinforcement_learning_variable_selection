@@ -144,9 +144,7 @@ def evaluate_agent(
     """Evaluate trained agent: select features, then evaluate on test set with task-appropriate metrics."""
     selected_features = agent.select_features(deterministic=deterministic)
     results = evaluate_selection(
-        X_train, y_train, X_test, y_test,
-        selected_features,
-        task=task,
+        X_test, y_test, selected_features, task=task
     )
     return selected_features, results
 
@@ -272,7 +270,7 @@ def main():
     if args.task == "regression":
         print(f"  Test R²: {val_results['test_r2']:.4f}, MSE: {val_results['test_mse']:.4f}")
     else:
-        print(f"  Test accuracy: {val_results['test_accuracy']:.4f}, F1: {val_results['test_f1']:.4f}")
+        print(f"  Test F1: {val_results['test_f1']:.4f}")
     
     # Evaluate on test set
     print("\nEvaluating on test set...")
@@ -284,7 +282,7 @@ def main():
     if args.task == "regression":
         print(f"  Test R²: {test_results['test_r2']:.4f}, MSE: {test_results['test_mse']:.4f}")
     else:
-        print(f"  Test accuracy: {test_results['test_accuracy']:.4f}, F1: {test_results['test_f1']:.4f}")
+        print(f"  Test F1: {test_results['test_f1']:.4f}")
     print(f"  Selected feature indices: {test_features.tolist()}")
     
     # Compare with baselines

@@ -114,8 +114,8 @@ class SequentialVariableSelectionPPO(BaseVariableSelectionPPO):
         )
     
     def select_features(self, deterministic: bool = True) -> np.ndarray:
-        """Select features by running a full episode."""
-        obs, _ = self.env.reset()
+        """Select features by running a full episode from empty selection."""
+        obs, _ = self.env.reset(options={"random_start": False})
         while True:
             action = self.predict(obs, deterministic=deterministic)
             obs, _, terminated, truncated, _ = self.env.step(action)
