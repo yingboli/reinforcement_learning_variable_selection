@@ -197,12 +197,13 @@ def _lasso_by_criterion(
     X_fit = X_train
     w = np.ones(p)
     if adaptive:
+        # Adaptive Lasso: design scaled by |β̂_MLE| so Lasso penalty λΣ|δ_j| = λΣ|β_j|/|β̂_j|
         if task == "regression":
             ols_init = LinearRegression().fit(X_train, y_train)
-            w = 1 / np.maximum(np.abs(ols_init.coef_), 1e-5)
+            w = np.maximum(np.abs(ols_init.coef_), 1e-5)
         else:
             logreg_mle = LogisticRegression(penalty="none", max_iter=1000, random_state=random_state).fit(X_train, y_train)
-            w = 1 / np.maximum(np.abs(logreg_mle.coef_.ravel()), 1e-5)
+            w = np.maximum(np.abs(logreg_mle.coef_.ravel()), 1e-5)
         X_fit = X_train * w
 
     # Classification

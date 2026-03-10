@@ -90,6 +90,7 @@ def run_single_simulation_from_data(
     random_state: int,
     verbose: int = 0,
     reward_type: str = "cv_rmse",
+    sequential_gammas: Optional[list] = None,
 ) -> dict:
     """
     Run one simulation from pre-split (X_train, y_train), (X_test, y_test) and true feature indices.
@@ -97,7 +98,10 @@ def run_single_simulation_from_data(
     Runs Bandit MDP, Sequential MDP, LassoCV, Backward selection, and All-features baseline; returns a results dict.
     reward_type: For regression use 'cv_rmse', 'aic', 'bic', or 'bayes_factor'.
     Baselines (Lasso, Adaptive Lasso, Forward, Backward) use the same criterion as reward_type (cv_rmse->cv).
+    sequential_gammas: list of gamma values for Sequential MDP (default [0.3]).
     """
+    if sequential_gammas is None:
+        sequential_gammas = [0.3]
     n_features = X_train.shape[1]
     n_informative = len(true_features)
     selection_criterion = "cv" if reward_type == "cv_rmse" else reward_type
@@ -123,8 +127,7 @@ def run_single_simulation_from_data(
     bandit_features = agent_bandit.select_features(deterministic=True)
     _record_selection(results, "bandit", bandit_features, X_test, y_test, true_features, n_features, time.time() - t0, random_state=random_state)
 
-    # Sequential (gamma=0 for clearer immediate-reward signal; random starts + improvement bonus to reduce null under-selection)
-    t0 = time.time()
+    # Sequential: run for each gamma in sequential_gammas (random starts + improvement bonus)
     env_seq = SequentialVariableSelectionEnv(
         X_train, y_train,
         reward_type=reward_type, cv_folds=5,
@@ -133,13 +136,15 @@ def run_single_simulation_from_data(
         improvement_bonus_coef=0.2,
         random_state=random_state,
     )
-    agent_seq = SequentialVariableSelectionPPO(
-        env_seq, learning_rate=3e-4, gamma=0.0, ent_coef=0.02,
-        verbose=verbose, seed=random_state,
-    )
-    agent_seq.train(total_timesteps=int(total_timesteps * 2))  # more experience for sequential
-    seq_features = agent_seq.select_features(deterministic=True)
-    _record_selection(results, "sequential", seq_features, X_test, y_test, true_features, n_features, time.time() - t0, random_state=random_state)
+    for gamma in sequential_gammas:
+        t0 = time.time()
+        agent_seq = SequentialVariableSelectionPPO(
+            env_seq, learning_rate=3e-4, gamma=gamma, ent_coef=0.02,
+            verbose=verbose, seed=random_state,
+        )
+        agent_seq.train(total_timesteps=int(total_timesteps * 2))
+        seq_features = agent_seq.select_features(deterministic=True)
+        _record_selection(results, f"sequential_g{gamma}", seq_features, X_test, y_test, true_features, n_features, time.time() - t0, random_state=random_state)
 
     # Baselines (same criteria as compare_with_baselines)
     _run_select_and_record(
@@ -162,11 +167,12 @@ def run_single_simulation_from_data(
         lambda: _forward_backward_selection_by_criterion(X_train, y_train, task="regression", criterion=selection_criterion, cv=5, direction="backward", random_state=random_state),
         X_test, y_test, true_features, n_features, random_state=random_state,
     )
-    _run_select_and_record(
-        results, "mcmc",
-        lambda: _mcmc_metropolis_variable_selection(X_train, y_train, random_state=random_state),
-        X_test, y_test, true_features, n_features, random_state=random_state,
-    )
+    if selection_criterion == "bayes_factor":
+        _run_select_and_record(
+            results, "mcmc",
+            lambda: _mcmc_metropolis_variable_selection(X_train, y_train, n_iter=total_timesteps, random_state=random_state),
+            X_test, y_test, true_features, n_features, random_state=random_state,
+        )
 
     # All features
     all_eval = evaluate_selection(X_test, y_test, np.arange(n_features), task="regression", random_state=random_state)
@@ -202,7 +208,14 @@ def main():
         choices=("all", "cv_rmse", "aic", "bic", "bayes_factor"),
         help="Reward for RL envs: 'all' (default, loop over all four), cv_rmse, aic, bic, or bayes_factor",
     )
+    parser.add_argument(
+        "--sequential_gammas",
+        type=str,
+        default="0.3",
+        help="Comma-separated gamma values for Sequential MDP (e.g. '0.3' or '0,0.3,0.9,1'). Default: 0.3",
+    )
     args = parser.parse_args()
+    sequential_gammas = [float(x.strip()) for x in args.sequential_gammas.split(",")]
 
     reward_types = ("cv_rmse", "aic", "bic", "bayes_factor") if args.reward_type == "all" else (args.reward_type,)
     output_path = Path(args.output_dir)
@@ -250,6 +263,7 @@ def main():
                             random_state=seed,
                             verbose=args.verbose,
                             reward_type=reward_type,
+                            sequential_gammas=sequential_gammas,
                         )
 
                         # One row per run with design + metrics
@@ -265,14 +279,10 @@ def main():
                             "total_timesteps": args.total_timesteps,
                             "reward_type": res["reward_type"],
                         }
-                        for method in ["bandit", "sequential", "lasso", "adaptive_lasso", "forward", "backward", "mcmc"]:
-                            row[f"{method}_n_selected"] = res[f"{method}_n_selected"]
-                            row[f"{method}_test_r2"] = res[f"{method}_test_r2"]
-                            row[f"{method}_test_mse"] = res[f"{method}_test_mse"]
-                            row[f"{method}_precision"] = res[f"{method}_precision"]
-                            row[f"{method}_recall"] = res[f"{method}_recall"]
-                            row[f"{method}_f1"] = res[f"{method}_f1"]
-                            row[f"{method}_runtime_sec"] = res[f"{method}_runtime_sec"]
+                        _methods = ["bandit"] + [f"sequential_g{g}" for g in sequential_gammas] + ["lasso", "adaptive_lasso", "forward", "backward", "mcmc"]
+                        for method in _methods:
+                            for suffix in ["n_selected", "test_r2", "test_mse", "precision", "recall", "f1", "runtime_sec"]:
+                                row[f"{method}_{suffix}"] = res.get(f"{method}_{suffix}")
                         row["all_features_test_r2"] = res["all_features_test_r2"]
                         row["all_features_test_mse"] = res["all_features_test_mse"]
                         rows.append(row)
@@ -286,7 +296,8 @@ def main():
         # Summary: mean ± std by (n, p_total, p_true, snr, rho, reward_type)
         group_cols = ["n", "p_total", "p_true", "snr", "rho", "reward_type"]
         agg_spec = {}
-        for method in ["bandit", "sequential", "lasso", "adaptive_lasso", "forward", "backward", "mcmc"]:
+        _methods = ["bandit"] + [f"sequential_g{g}" for g in sequential_gammas] + ["lasso", "adaptive_lasso", "forward", "backward", "mcmc"]
+        for method in _methods:
             for m in ["n_selected", "test_r2", "test_mse", "f1", "runtime_sec"]:
                 col = f"{method}_{m}"
                 agg_spec[f"{col}_mean"] = (col, "mean")
