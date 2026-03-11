@@ -155,6 +155,11 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
             )
             self.state[random_indices] = 1
         
+        # Initialize previous reward for delta reward computation
+        # This avoids double-counting when using gamma > 0
+        selected_indices = np.where(self.state == 1)[0]
+        self._prev_reward = self._compute_reward(selected_indices)
+        
         obs = self._get_observation()
         info = {
             "n_selected": int(np.sum(self.state)),
@@ -173,19 +178,22 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         
         if self.include_stop_action and action == stop_action_idx:
             # Stop: terminate with current selection
+            # Use delta reward (should be 0 since state didn't change)
             selected_indices = np.where(self.state == 1)[0]
-            reward = self._compute_reward(selected_indices)
+            current_reward = self._compute_reward(selected_indices)
+            delta_reward = current_reward - self._prev_reward  # Should be ~0
             obs = self._get_observation()
             info = {
                 "n_selected": len(selected_indices),
                 "selected_features": selected_indices.tolist(),
-                "reward": reward,
+                "reward": delta_reward,
+                "current_objective": current_reward,
                 "step": self.current_step,
                 "action": action,
                 "action_mask": self._get_action_mask(),
                 "stopped": True,
             }
-            return obs, reward, True, False, info
+            return obs, delta_reward, True, False, info
         
         invalid = False
         if self.action_type == "toggle":
@@ -205,21 +213,30 @@ class SequentialVariableSelectionEnv(BaseVariableSelectionEnv):
         
         self.current_step += 1
         selected_indices = np.where(self.state == 1)[0]
-        reward = self._compute_reward(selected_indices)
+        current_reward = self._compute_reward(selected_indices)
+        
+        # Use DELTA reward to avoid double-counting with gamma > 0
+        # delta_reward = improvement from this action
+        # Sum of all delta rewards = final reward (no double counting)
+        delta_reward = current_reward - self._prev_reward
+        self._prev_reward = current_reward
+        
         if invalid:
-            reward = reward - self.invalid_action_penalty
+            delta_reward = delta_reward - self.invalid_action_penalty
+        
         terminated = self.current_step >= self.max_episode_steps
         obs = self._get_observation()
         info = {
             "n_selected": len(selected_indices),
             "selected_features": selected_indices.tolist(),
-            "reward": reward,
+            "reward": delta_reward,
+            "current_objective": current_reward,  # For debugging
             "step": self.current_step,
             "action": action,
             "action_mask": self._get_action_mask(),
             "stopped": False,
         }
-        return obs, reward, terminated, False, info
+        return obs, delta_reward, terminated, False, info
     
     def render(self) -> None:
         selected_indices = np.where(self.state == 1)[0]

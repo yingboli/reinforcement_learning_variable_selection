@@ -189,51 +189,64 @@ def run_single_simulation(
         print(f"True feature indices: {sorted(true_features)}")
         print(f"{'='*60}")
     
-    if verbose:
-        print("\n[1/4] Training Bandit MDP agent...")
+    # Test multiple objective functions for Bandit MDP
+    reward_types = ["r2", "aic", "bic", "bayes_factor"]
     
-    bandit_start = time.time()
-    env_bandit = VariableSelectionEnv(
-        X_train_scaled, y_train_scaled,
-        sparsity_penalty=sparsity_penalty,
-        reward_type="r2",
-        use_cv=True,
-        cv_folds=3,
-        random_state=random_state,
-    )
+    for rt_idx, reward_type in enumerate(reward_types):
+        if verbose:
+            print(f"\n[{rt_idx+1}/{len(reward_types)+2}] Training Bandit MDP ({reward_type})...")
+        
+        bandit_start = time.time()
+        env_bandit = VariableSelectionEnv(
+            X_train_scaled, y_train_scaled,
+            sparsity_penalty=sparsity_penalty if reward_type == "r2" else 0.0,  # AIC/BIC/BF have built-in penalty
+            reward_type=reward_type,
+            use_cv=True if reward_type == "r2" else False,  # CV only for R²
+            cv_folds=3,
+            random_state=random_state,
+        )
+        
+        agent_bandit = VariableSelectionPPO(
+            env_bandit,
+            learning_rate=3e-4,
+            verbose=0,
+            seed=random_state,
+        )
+        agent_bandit.train(total_timesteps=total_timesteps)
+        
+        bandit_features = agent_bandit.select_features(deterministic=True)
+        bandit_runtime = time.time() - bandit_start
+        
+        bandit_eval = evaluate_selection(
+            X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled,
+            bandit_features, task="regression"
+        )
+        bandit_pr = compute_precision_recall(bandit_features, true_features, n_features)
+        
+        # Store results with reward_type suffix
+        prefix = f"bandit_{reward_type}"
+        results[f"{prefix}_selected_features"] = sorted(bandit_features.tolist())
+        results[f"{prefix}_n_selected"] = len(bandit_features)
+        results[f"{prefix}_test_r2"] = bandit_eval["test_r2"]
+        results[f"{prefix}_test_mse"] = bandit_eval["test_mse"]
+        results[f"{prefix}_precision"] = bandit_pr["precision"]
+        results[f"{prefix}_recall"] = bandit_pr["recall"]
+        results[f"{prefix}_f1"] = bandit_pr["f1"]
+        results[f"{prefix}_runtime_sec"] = bandit_runtime
+        
+        if verbose:
+            print(f"  Bandit({reward_type}) selected {len(bandit_features)} features")
+            print(f"  Precision: {bandit_pr['precision']:.3f}, Recall: {bandit_pr['recall']:.3f}, F1: {bandit_pr['f1']:.3f}")
     
-    agent_bandit = VariableSelectionPPO(
-        env_bandit,
-        learning_rate=3e-4,
-        verbose=verbose,
-        seed=random_state,
-    )
-    agent_bandit.train(total_timesteps=total_timesteps)
-    
-    bandit_features = agent_bandit.select_features(deterministic=True)
-    bandit_runtime = time.time() - bandit_start
-    
-    bandit_eval = evaluate_selection(
-        X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled,
-        bandit_features, task="regression"
-    )
-    bandit_pr = compute_precision_recall(bandit_features, true_features, n_features)
-    
-    results["bandit_selected_features"] = sorted(bandit_features.tolist())
-    results["bandit_n_selected"] = len(bandit_features)
-    results["bandit_test_r2"] = bandit_eval["test_r2"]
-    results["bandit_test_mse"] = bandit_eval["test_mse"]
-    results["bandit_cv_r2_mean"] = bandit_eval["cv_r2_mean"]
-    results["bandit_precision"] = bandit_pr["precision"]
-    results["bandit_recall"] = bandit_pr["recall"]
-    results["bandit_f1"] = bandit_pr["f1"]
-    results["bandit_runtime_sec"] = bandit_runtime
-    
-    if verbose:
-        print(f"  Bandit selected {len(bandit_features)} features: {sorted(bandit_features.tolist())}")
-        print(f"  Bandit Test R²: {bandit_eval['test_r2']:.4f}, MSE: {bandit_eval['test_mse']:.4f}")
-        print(f"  Bandit Precision: {bandit_pr['precision']:.3f}, Recall: {bandit_pr['recall']:.3f}, F1: {bandit_pr['f1']:.3f}")
-        print(f"  Bandit Runtime: {bandit_runtime:.2f}s")
+    # Keep backward compatibility - copy r2 results to default bandit keys
+    results["bandit_selected_features"] = results["bandit_r2_selected_features"]
+    results["bandit_n_selected"] = results["bandit_r2_n_selected"]
+    results["bandit_test_r2"] = results["bandit_r2_test_r2"]
+    results["bandit_test_mse"] = results["bandit_r2_test_mse"]
+    results["bandit_precision"] = results["bandit_r2_precision"]
+    results["bandit_recall"] = results["bandit_r2_recall"]
+    results["bandit_f1"] = results["bandit_r2_f1"]
+    results["bandit_runtime_sec"] = results["bandit_r2_runtime_sec"]
     
     if verbose:
         print("\n[2/4] Training Sequential MDP agent...")
@@ -320,9 +333,12 @@ def run_single_simulation(
     if verbose:
         print("\n[4/4] Running RFE baseline...")
     
+    # Use a common heuristic (not ground truth): select ~1/3 of features
+    n_features_to_select = max(1, n_features // 3)
+    
     rfe_start = time.time()
     try:
-        rfe = RFE(Ridge(alpha=1.0), n_features_to_select=n_informative)
+        rfe = RFE(Ridge(alpha=1.0), n_features_to_select=n_features_to_select)
         rfe.fit(X_train_scaled, y_train_scaled)
         rfe_features = np.where(rfe.get_support())[0]
         rfe_runtime = time.time() - rfe_start
@@ -372,10 +388,9 @@ def run_simulation_suite(output_dir: str = "./results", verbose: int = 1, n_runs
     output_path.mkdir(parents=True, exist_ok=True)
     
     configs = [
-        {"n_samples": 500, "n_informative": 5, "n_fake": 15, "noise": 2.0, "timesteps": 5000},
-        {"n_samples": 1000, "n_informative": 8, "n_fake": 22, "noise": 2.0, "timesteps": 5000},
-        {"n_samples": 2000, "n_informative": 10, "n_fake": 40, "noise": 2.0, "timesteps": 8000},
-        {"n_samples": 5000, "n_informative": 15, "n_fake": 35, "noise": 2.0, "timesteps": 10000},
+        {"n_samples": 10000, "n_informative": 10, "n_fake": 5, "noise": 2.0, "timesteps": 5000},
+        {"n_samples": 10000, "n_informative": 10, "n_fake": 10, "noise": 2.0, "timesteps": 5000},
+        {"n_samples": 10000, "n_informative": 10, "n_fake": 20, "noise": 2.0, "timesteps": 5000},
     ]
     
     all_results = []
@@ -418,22 +433,26 @@ def run_simulation_suite(output_dir: str = "./results", verbose: int = 1, n_runs
             all_results.append(results)
             
             if verbose or (run_idx + 1) % 10 == 0:
-                print(f"Bandit F1={results['bandit_f1']:.3f}, RFE F1={results['rfe_f1']:.3f}")
+                print(f"Bandit-R2 F1={results['bandit_r2_f1']:.3f}, RFE F1={results['rfe_f1']:.3f}")
         
         # Compute statistics for this configuration
         stats = compute_config_statistics(config_runs, config, i + 1)
         config_statistics.append(stats)
         
         print(f"\n  Configuration {i+1} Summary:")
-        print(f"    Bandit: F1={stats['bandit_f1_mean']:.3f}±{stats['bandit_f1_std']:.3f}, Precision={stats['bandit_precision_mean']:.3f}±{stats['bandit_precision_std']:.3f}")
+        for mt in ["bandit_r2", "bandit_aic", "bandit_bic", "bandit_bayes_factor"]:
+            lbl = mt.replace("bandit_", "Bandit-").upper()
+            print(f"    {lbl}: F1={stats[f'{mt}_f1_mean']:.3f}±{stats[f'{mt}_f1_std']:.3f}")
         print(f"    Sequential: F1={stats['sequential_f1_mean']:.3f}±{stats['sequential_f1_std']:.3f}")
         print(f"    LassoCV: F1={stats['lasso_f1_mean']:.3f}±{stats['lasso_f1_std']:.3f}")
         print(f"    RFE: F1={stats['rfe_f1_mean']:.3f}±{stats['rfe_f1_std']:.3f}")
     
-    # Save all individual run results
+    # Save all individual run results (Bandit has 4 objectives: r2, aic, bic, bayes_factor)
     all_runs_rows = []
+    methods_export = ["bandit_r2", "bandit_aic", "bandit_bic", "bandit_bayes_factor", "sequential", "lasso", "rfe"]
     for r in all_results:
-        for method in ["bandit", "sequential", "lasso", "rfe"]:
+        for method in methods_export:
+            method_label = method.replace("bandit_", "Bandit-") if method.startswith("bandit_") else method.capitalize()
             row = {
                 "config_id": r["config_id"],
                 "run_id": r.get("run_id", 1),
@@ -441,7 +460,7 @@ def run_simulation_suite(output_dir: str = "./results", verbose: int = 1, n_runs
                 "n_informative": r["n_informative"],
                 "n_fake": r["n_fake"],
                 "noise": r["noise"],
-                "method": method.capitalize(),
+                "method": method_label,
                 "n_selected": r[f"{method}_n_selected"],
                 "test_r2": r[f"{method}_test_r2"],
                 "test_mse": r[f"{method}_test_mse"],
@@ -486,8 +505,9 @@ def compute_config_statistics(config_runs: list, config: dict, config_id: int) -
         "n_runs": len(config_runs),
     }
     
-    # Collect metrics for each method
-    for method in ["bandit", "sequential", "lasso", "rfe"]:
+    # Collect metrics for each method (Bandit has 4 objectives)
+    methods = ["bandit_r2", "bandit_aic", "bandit_bic", "bandit_bayes_factor", "sequential", "lasso", "rfe"]
+    for method in methods:
         for metric in ["n_selected", "test_r2", "test_mse", "precision", "recall", "f1", "runtime_sec"]:
             key = f"{method}_{metric}"
             values = [r[key] for r in config_runs if key in r]
@@ -516,8 +536,8 @@ def generate_markdown_report_with_stats(config_statistics: list, all_results: li
 ## Overview
 
 This report summarizes the results of running reinforcement learning-based variable selection
-on synthetic datasets with known ground truth. We compare two RL approaches (Bandit MDP and 
-Sequential MDP) against traditional baseline methods (LassoCV and RFE).
+on synthetic datasets with known ground truth. We compare Bandit MDP (with 4 objective functions:
+R², AIC, BIC, Bayes Factor), Sequential MDP, and traditional baselines (LassoCV, RFE).
 
 Each configuration was run **{n_runs} times** with different random seeds to compute mean ± standard deviation.
 
@@ -525,14 +545,14 @@ Each configuration was run **{n_runs} times** with different random seeds to com
 
 | Method | Stopping Criteria | Convergence Check |
 |--------|-------------------|-------------------|
-| **Bandit MDP** | Fixed timesteps (15,000-20,000) | No early stopping; runs for full timesteps |
-| **Sequential MDP** | Fixed timesteps (15,000-20,000) | No early stopping; gamma=0 (immediate reward only) |
+| **Bandit MDP** (R²/AIC/BIC/BF) | Fixed timesteps (5000) | No early stopping; runs for full timesteps |
+| **Sequential MDP** | Fixed timesteps (5000) | gamma=0.99 with delta reward |
 | **LassoCV** | Cross-validation convergence | Automatic via sklearn (max_iter=2000, cv=5) |
-| **RFE** | All features ranked | Deterministic; selects exactly n_informative features |
+| **RFE** | All features ranked | Selects max(1, n_features//3) features (fair comparison, no ground truth) |
 
 ### PPO Training Details (for RL methods)
 
-- **Objective**: Maximize reward = R² - 0.01 × n_selected_features
+- **Objectives** (Bandit): R² (CV_R² - 0.01×n), AIC (-AIC), BIC (-BIC), Bayes Factor (log BF)
 - **Algorithm**: PPO with clipped surrogate objective (clip_range=0.2)
 - **Batch size**: 64, n_epochs=10 per update
 - **Learning rate**: 3e-4
@@ -567,14 +587,17 @@ Each configuration was run **{n_runs} times** with different random seeds to com
 
 | Method | Features | Test R² | Test MSE | Precision | Recall | F1 | Runtime (s) |
 |--------|----------|---------|----------|-----------|--------|-----|-------------|
-| Bandit MDP | {s['bandit_n_selected_mean']:.1f}±{s['bandit_n_selected_std']:.1f} | {s['bandit_test_r2_mean']:.3f}±{s['bandit_test_r2_std']:.3f} | {s['bandit_test_mse_mean']:.3f}±{s['bandit_test_mse_std']:.3f} | {s['bandit_precision_mean']:.3f}±{s['bandit_precision_std']:.3f} | {s['bandit_recall_mean']:.3f}±{s['bandit_recall_std']:.3f} | {s['bandit_f1_mean']:.3f}±{s['bandit_f1_std']:.3f} | {s['bandit_runtime_sec_mean']:.1f}±{s['bandit_runtime_sec_std']:.1f} |
-| Sequential MDP | {s['sequential_n_selected_mean']:.1f}±{s['sequential_n_selected_std']:.1f} | {s['sequential_test_r2_mean']:.3f}±{s['sequential_test_r2_std']:.3f} | {s['sequential_test_mse_mean']:.3f}±{s['sequential_test_mse_std']:.3f} | {s['sequential_precision_mean']:.3f}±{s['sequential_precision_std']:.3f} | {s['sequential_recall_mean']:.3f}±{s['sequential_recall_std']:.3f} | {s['sequential_f1_mean']:.3f}±{s['sequential_f1_std']:.3f} | {s['sequential_runtime_sec_mean']:.1f}±{s['sequential_runtime_sec_std']:.1f} |
-| LassoCV | {s['lasso_n_selected_mean']:.1f}±{s['lasso_n_selected_std']:.1f} | {s['lasso_test_r2_mean']:.3f}±{s['lasso_test_r2_std']:.3f} | {s['lasso_test_mse_mean']:.3f}±{s['lasso_test_mse_std']:.3f} | {s['lasso_precision_mean']:.3f}±{s['lasso_precision_std']:.3f} | {s['lasso_recall_mean']:.3f}±{s['lasso_recall_std']:.3f} | {s['lasso_f1_mean']:.3f}±{s['lasso_f1_std']:.3f} | {s['lasso_runtime_sec_mean']:.1f}±{s['lasso_runtime_sec_std']:.1f} |
-| RFE | {s['rfe_n_selected_mean']:.1f}±{s['rfe_n_selected_std']:.1f} | {s['rfe_test_r2_mean']:.3f}±{s['rfe_test_r2_std']:.3f} | {s['rfe_test_mse_mean']:.3f}±{s['rfe_test_mse_std']:.3f} | {s['rfe_precision_mean']:.3f}±{s['rfe_precision_std']:.3f} | {s['rfe_recall_mean']:.3f}±{s['rfe_recall_std']:.3f} | {s['rfe_f1_mean']:.3f}±{s['rfe_f1_std']:.3f} | {s['rfe_runtime_sec_mean']:.1f}±{s['rfe_runtime_sec_std']:.1f} |
-| All Features | {s['n_total_features']} | {s['all_features_test_r2_mean']:.3f}±{s['all_features_test_r2_std']:.3f} | - | {s['n_informative']/s['n_total_features']:.3f} | 1.000 | {2*(s['n_informative']/s['n_total_features'])/(1+s['n_informative']/s['n_total_features']):.3f} | - |
+"""
+        bandit_methods = [("bandit_r2", "Bandit-R²"), ("bandit_aic", "Bandit-AIC"), ("bandit_bic", "Bandit-BIC"), ("bandit_bayes_factor", "Bandit-BF")]
+        for method_key, method_label in bandit_methods:
+            md_content += f"| {method_label} | {s[f'{method_key}_n_selected_mean']:.1f}±{s[f'{method_key}_n_selected_std']:.1f} | {s[f'{method_key}_test_r2_mean']:.3f}±{s[f'{method_key}_test_r2_std']:.3f} | {s[f'{method_key}_test_mse_mean']:.3f}±{s[f'{method_key}_test_mse_std']:.3f} | {s[f'{method_key}_precision_mean']:.3f}±{s[f'{method_key}_precision_std']:.3f} | {s[f'{method_key}_recall_mean']:.3f}±{s[f'{method_key}_recall_std']:.3f} | {s[f'{method_key}_f1_mean']:.3f}±{s[f'{method_key}_f1_std']:.3f} | {s[f'{method_key}_runtime_sec_mean']:.1f}±{s[f'{method_key}_runtime_sec_std']:.1f} |\n"
+        md_content += f"| Sequential MDP | {s['sequential_n_selected_mean']:.1f}±{s['sequential_n_selected_std']:.1f} | {s['sequential_test_r2_mean']:.3f}±{s['sequential_test_r2_std']:.3f} | {s['sequential_test_mse_mean']:.3f}±{s['sequential_test_mse_std']:.3f} | {s['sequential_precision_mean']:.3f}±{s['sequential_precision_std']:.3f} | {s['sequential_recall_mean']:.3f}±{s['sequential_recall_std']:.3f} | {s['sequential_f1_mean']:.3f}±{s['sequential_f1_std']:.3f} | {s['sequential_runtime_sec_mean']:.1f}±{s['sequential_runtime_sec_std']:.1f} |\n"
+        md_content += f"| LassoCV | {s['lasso_n_selected_mean']:.1f}±{s['lasso_n_selected_std']:.1f} | {s['lasso_test_r2_mean']:.3f}±{s['lasso_test_r2_std']:.3f} | {s['lasso_test_mse_mean']:.3f}±{s['lasso_test_mse_std']:.3f} | {s['lasso_precision_mean']:.3f}±{s['lasso_precision_std']:.3f} | {s['lasso_recall_mean']:.3f}±{s['lasso_recall_std']:.3f} | {s['lasso_f1_mean']:.3f}±{s['lasso_f1_std']:.3f} | {s['lasso_runtime_sec_mean']:.1f}±{s['lasso_runtime_sec_std']:.1f} |\n"
+        md_content += f"| RFE | {s['rfe_n_selected_mean']:.1f}±{s['rfe_n_selected_std']:.1f} | {s['rfe_test_r2_mean']:.3f}±{s['rfe_test_r2_std']:.3f} | {s['rfe_test_mse_mean']:.3f}±{s['rfe_test_mse_std']:.3f} | {s['rfe_precision_mean']:.3f}±{s['rfe_precision_std']:.3f} | {s['rfe_recall_mean']:.3f}±{s['rfe_recall_std']:.3f} | {s['rfe_f1_mean']:.3f}±{s['rfe_f1_std']:.3f} | {s['rfe_runtime_sec_mean']:.1f}±{s['rfe_runtime_sec_std']:.1f} |\n"
+        md_content += f"| All Features | {s['n_total_features']} | {s['all_features_test_r2_mean']:.3f}±{s['all_features_test_r2_std']:.3f} | - | {s['n_informative']/s['n_total_features']:.3f} | 1.000 | {2*(s['n_informative']/s['n_total_features'])/(1+s['n_informative']/s['n_total_features']):.3f} | - |\n"
+        md_content += """
 
 ---
-
 """
     
     # Overall summary across all configurations
@@ -584,15 +607,18 @@ Each configuration was run **{n_runs} times** with different random seeds to com
 |--------|--------------|--------|---------------|------------|--------|-----------------|
 """
     
-    for method in ["bandit", "sequential", "lasso", "rfe"]:
-        avg_features = np.mean([s[f"{method}_n_selected_mean"] for s in config_statistics])
-        avg_r2 = np.mean([s[f"{method}_test_r2_mean"] for s in config_statistics])
-        avg_precision = np.mean([s[f"{method}_precision_mean"] for s in config_statistics])
-        avg_recall = np.mean([s[f"{method}_recall_mean"] for s in config_statistics])
-        avg_f1 = np.mean([s[f"{method}_f1_mean"] for s in config_statistics])
-        avg_runtime = np.mean([s[f"{method}_runtime_sec_mean"] for s in config_statistics])
-        
-        method_name = {"bandit": "Bandit MDP", "sequential": "Sequential MDP", "lasso": "LassoCV", "rfe": "RFE"}[method]
+    methods_summary = [
+        ("bandit_r2", "Bandit-R²"), ("bandit_aic", "Bandit-AIC"), ("bandit_bic", "Bandit-BIC"),
+        ("bandit_bayes_factor", "Bandit-BF"), ("sequential", "Sequential MDP"),
+        ("lasso", "LassoCV"), ("rfe", "RFE")
+    ]
+    for method_key, method_name in methods_summary:
+        avg_features = np.mean([s[f"{method_key}_n_selected_mean"] for s in config_statistics])
+        avg_r2 = np.mean([s[f"{method_key}_test_r2_mean"] for s in config_statistics])
+        avg_precision = np.mean([s[f"{method_key}_precision_mean"] for s in config_statistics])
+        avg_recall = np.mean([s[f"{method_key}_recall_mean"] for s in config_statistics])
+        avg_f1 = np.mean([s[f"{method_key}_f1_mean"] for s in config_statistics])
+        avg_runtime = np.mean([s[f"{method_key}_runtime_sec_mean"] for s in config_statistics])
         md_content += f"| {method_name} | {avg_features:.1f} | {avg_r2:.3f} | {avg_precision:.3f} | {avg_recall:.3f} | {avg_f1:.3f} | {avg_runtime:.1f} |\n"
     
     md_content += f"""
@@ -606,9 +632,10 @@ is determined by observing the stability of results across multiple runs:
 """
     
     for s in config_statistics:
-        bandit_converged = "✓ Converged" if s['bandit_f1_std'] < 0.1 else "⚠ High variance"
+        for mt, lbl in [("bandit_r2", "Bandit-R²"), ("bandit_aic", "Bandit-AIC"), ("bandit_bic", "Bandit-BIC"), ("bandit_bayes_factor", "Bandit-BF")]:
+            converged = "✓ Converged" if s[f'{mt}_f1_std'] < 0.1 else "⚠ High variance"
+            md_content += f"| Config {s['config_id']} - {lbl} | {s[f'{mt}_f1_std']:.3f} | {converged} |\n"
         seq_converged = "✓ Converged" if s['sequential_f1_std'] < 0.1 else "⚠ High variance"
-        md_content += f"| Config {s['config_id']} - Bandit | {s['bandit_f1_std']:.3f} | {bandit_converged} |\n"
         md_content += f"| Config {s['config_id']} - Sequential | {s['sequential_f1_std']:.3f} | {seq_converged} |\n"
     
     md_content += """
