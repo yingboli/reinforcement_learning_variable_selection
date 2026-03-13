@@ -185,9 +185,9 @@ def run_single_simulation_from_data(
 # Design grid
 DESIGN_N_P_PTRUE = [
     # (1000, 50, 0),
-    (1000, 50, 5),
-    (1000, 50, 20),
-    # (10000, 200, 20),
+    # (1000, 50, 5),
+    # (1000, 50, 20),
+    (10000, 200, 20),
 ]
 SNR_VALUES = [0.5, 1.0, 2.0]
 RHO_VALUES = [0.0, 0.5, 0.9]
